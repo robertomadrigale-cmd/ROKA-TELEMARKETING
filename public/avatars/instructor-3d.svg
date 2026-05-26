@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 520" role="img" aria-label="Instructor 3D">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dcebdc"/>
+      <stop offset="1" stop-color="#f7faf7"/>
+    </linearGradient>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d8a17a"/>
+      <stop offset="1" stop-color="#b87355"/>
+    </linearGradient>
+  </defs>
+  <rect width="420" height="520" rx="32" fill="url(#bg)"/>
+  <circle cx="210" cy="208" r="154" fill="#cfe4d0"/>
+  <path d="M112 448c8-94 56-144 98-144s90 50 98 144z" fill="#1f5134"/>
+  <path d="M154 340h112v118H154z" fill="#20382c"/>
+  <path d="M176 300h68v76c0 19-15 34-34 34s-34-15-34-34z" fill="#b87355"/>
+  <rect x="124" y="92" width="172" height="214" rx="78" fill="url(#skin)"/>
+  <path d="M116 150c13-73 61-98 110-90 55 8 83 48 78 105-44-26-113-29-188-15z" fill="#23201d"/>
+  <circle cx="174" cy="204" r="10" fill="#12241b"/>
+  <circle cx="246" cy="204" r="10" fill="#12241b"/>
+  <path d="M185 256h50" stroke="#68372e" stroke-width="14" stroke-linecap="round"/>
+  <path d="M94 446h232v42H94z" fill="#102017"/>
+</svg>

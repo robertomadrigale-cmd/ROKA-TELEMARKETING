@@ -1,0 +1,5 @@
+provider-config.local.json
+provider-config.local.json.*.tmp
+knowledge.local.json
+knowledge.local.json.*.tmp
+avatar-files.local/

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 520" role="img" aria-label="Ready Player Me avatar">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e7eef7"/>
+      <stop offset="1" stop-color="#f8fbff"/>
+    </linearGradient>
+    <linearGradient id="jacket" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2f6b45"/>
+      <stop offset="1" stop-color="#15251d"/>
+    </linearGradient>
+  </defs>
+  <rect width="420" height="520" rx="32" fill="url(#bg)"/>
+  <circle cx="210" cy="204" r="156" fill="#d9e6f4"/>
+  <path d="M98 456c11-96 63-148 112-148s101 52 112 148z" fill="url(#jacket)"/>
+  <path d="M172 319h76v92c0 21-17 38-38 38s-38-17-38-38z" fill="#98684f"/>
+  <rect x="118" y="88" width="184" height="226" rx="86" fill="#c28a67"/>
+  <path d="M132 154c16-61 48-88 96-88 50 0 80 35 82 92-58-30-112-31-178-4z" fill="#3c312b"/>
+  <rect x="148" y="196" width="44" height="20" rx="10" fill="#15251d"/>
+  <rect x="228" y="196" width="44" height="20" rx="10" fill="#15251d"/>
+  <path d="M192 260c12 12 28 12 40 0" stroke="#713b34" stroke-width="12" stroke-linecap="round"/>
+  <path d="M122 456h176v34H122z" fill="#f6f9ff"/>
+</svg>

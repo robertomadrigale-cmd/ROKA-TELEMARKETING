@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 520" role="img" aria-label="HeyGen avatar">
+  <rect width="420" height="520" rx="32" fill="#f4f1ea"/>
+  <rect x="54" y="52" width="312" height="416" rx="28" fill="#111815"/>
+  <rect x="74" y="72" width="272" height="376" rx="20" fill="#26352c"/>
+  <circle cx="210" cy="210" r="104" fill="#d1a17f"/>
+  <path d="M119 216c6-93 58-142 118-124 43 13 67 52 64 106-58-28-111-28-182 18z" fill="#26221f"/>
+  <circle cx="174" cy="214" r="8" fill="#102017"/>
+  <circle cx="246" cy="214" r="8" fill="#102017"/>
+  <path d="M188 266h44" stroke="#6f3b35" stroke-width="12" stroke-linecap="round"/>
+  <path d="M116 448c10-79 51-122 94-122s84 43 94 122z" fill="#f7fbf7"/>
+  <text x="210" y="38" text-anchor="middle" font-family="Arial" font-size="22" font-weight="700" fill="#2f6b45">HEYGEN</text>
+</svg>

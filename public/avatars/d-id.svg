@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 520" role="img" aria-label="D-ID avatar">
+  <rect width="420" height="520" rx="32" fill="#eef1f7"/>
+  <circle cx="210" cy="206" r="154" fill="#dce3ef"/>
+  <path d="M100 458c14-98 62-148 110-148s96 50 110 148z" fill="#17231d"/>
+  <rect x="126" y="92" width="168" height="218" rx="78" fill="#b9886d"/>
+  <path d="M126 150c23-63 62-82 110-72 44 10 70 40 75 93-61-18-117-20-185-21z" fill="#1e1f25"/>
+  <circle cx="176" cy="208" r="9" fill="#101815"/>
+  <circle cx="244" cy="208" r="9" fill="#101815"/>
+  <path d="M188 260h44" stroke="#61352f" stroke-width="12" stroke-linecap="round"/>
+  <path d="M154 342l56 68 56-68" fill="#f8fafc"/>
+  <text x="210" y="48" text-anchor="middle" font-family="Arial" font-size="26" font-weight="800" fill="#17231d">D-ID</text>
+</svg>
