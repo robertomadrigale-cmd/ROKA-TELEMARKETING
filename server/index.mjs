@@ -770,6 +770,16 @@ function getDidAuthHeader(apiKey) {
   return `Basic ${trimmed}`;
 }
 
+async function readDidResponse(response) {
+  const text = await response.text();
+  if (!text) return { data: {}, text: "" };
+  try {
+    return { data: JSON.parse(text), text };
+  } catch {
+    return { data: { description: text }, text };
+  }
+}
+
 app.post("/api/did/stream", async (req, res) => {
   try {
     const config = await getEffectiveConfig();
@@ -780,11 +790,12 @@ app.post("/api/did/stream", async (req, res) => {
     }
 
     const authHeader = getDidAuthHeader(did.apiKey);
-    const sourceUrl = req.body?.source_url || did.avatar || "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
+    const sourceUrl = req.body?.source_url || did.agent || did.avatar || "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
 
     const response = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
+        Accept: "application/json",
         Authorization: authHeader,
         "Content-Type": "application/json",
       },
@@ -793,11 +804,11 @@ app.post("/api/did/stream", async (req, res) => {
       }),
     });
 
-    const data = await response.json();
+    const { data, text } = await readDidResponse(response);
     if (!response.ok) {
       return res.status(response.status).json({
         error: "Error al crear flujo en D-ID",
-        detail: data.description || JSON.stringify(data)
+        detail: data.description || text || JSON.stringify(data)
       });
     }
 
@@ -824,6 +835,7 @@ app.post("/api/did/sdp", async (req, res) => {
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/sdp`, {
       method: "POST",
       headers: {
+        Accept: "application/json",
         Authorization: authHeader,
         "Content-Type": "application/json",
       },
@@ -865,6 +877,7 @@ app.post("/api/did/ice", async (req, res) => {
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/ice`, {
       method: "POST",
       headers: {
+        Accept: "application/json",
         Authorization: authHeader,
         "Content-Type": "application/json",
       },
@@ -908,6 +921,7 @@ app.post("/api/did/speak", async (req, res) => {
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}`, {
       method: "POST",
       headers: {
+        Accept: "application/json",
         Authorization: authHeader,
         "Content-Type": "application/json",
       },
@@ -924,11 +938,11 @@ app.post("/api/did/speak", async (req, res) => {
       }),
     });
 
-    const data = await response.json();
+    const { data, text: responseText } = await readDidResponse(response);
     if (!response.ok) {
       return res.status(response.status).json({
         error: "Error al solicitar voz a D-ID",
-        detail: data.description || JSON.stringify(data)
+        detail: data.description || responseText || JSON.stringify(data)
       });
     }
 

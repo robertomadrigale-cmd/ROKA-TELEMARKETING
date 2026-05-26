@@ -339,6 +339,16 @@ function avatarAssetUrl(src?: string) {
   return /^https?:\/\//i.test(src) ? `/api/avatar/proxy?url=${encodeURIComponent(src)}` : src;
 }
 
+async function readJsonResponse(response: Response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text };
+  }
+}
+
 export function App() {
   const [section, setSection] = useState<Section>("settings");
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -511,7 +521,7 @@ export function App() {
           strictKnowledge: settings.strictKnowledge,
         }),
       });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok) throw new Error(data.detail || data.error || "OpenAI no respondio.");
       const answer = data.answer || "Sin respuesta.";
       setMessages((current) => [...current, { id: Date.now() + 1, role: "assistant", text: answer }]);
@@ -526,7 +536,15 @@ export function App() {
             sessionId: didSessionId,
             text: answer
           })
-        });
+        })
+          .then(async (didRes) => {
+            const didData = await readJsonResponse(didRes);
+            if (!didRes.ok) throw new Error(didData.detail || didData.error || "D-ID no pudo hablar.");
+          })
+          .catch((didError) => {
+            setVoiceSource("none");
+            setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
+          });
       } else {
         setVoiceSource("browser");
         speak(answer);
@@ -742,10 +760,10 @@ export function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source_url: settings.providers.did.avatar || "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg"
+          source_url: settings.providers.did.agent || settings.providers.did.avatar || "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg"
         })
       });
-      const streamData = await resStream.json();
+      const streamData = await readJsonResponse(resStream);
       if (!resStream.ok) throw new Error(streamData.error || streamData.detail || "Error al crear flujo en D-ID");
 
       const { id: streamId, session_id: sessionId, offer, ice_servers } = streamData;
@@ -759,6 +777,8 @@ export function App() {
       peer.ontrack = (event) => {
         if (didVideoRef.current && event.streams && event.streams[0]) {
           didVideoRef.current.srcObject = event.streams[0];
+          didVideoRef.current.muted = false;
+          didVideoRef.current.volume = 1;
           didVideoRef.current.play().catch(() => undefined);
           setDidStatus("connected");
         }
@@ -818,7 +838,7 @@ export function App() {
         })
       });
       if (!resSdp.ok) {
-        const sdpError = await resSdp.json();
+        const sdpError = await readJsonResponse(resSdp);
         throw new Error(sdpError.error || sdpError.detail || "Error al enviar SDP");
       }
 
@@ -1240,7 +1260,6 @@ function SessionView({
                 className="avatar-video"
                 autoPlay
                 playsInline
-                muted
                 style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "12px", background: "#0f172a" }}
               />
             ) : (
