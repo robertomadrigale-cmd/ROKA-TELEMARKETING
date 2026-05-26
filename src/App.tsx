@@ -211,7 +211,7 @@ const defaultSettings: AppSettings = {
   systemInstructions:
     "Eres un asistente especializado en capacitacion. Usa la base de conocimiento recuperada por RAG. Si el modo estricto esta activo, no inventes informacion fuera de los documentos. Responde con pasos claros, ejemplos practicos y una pregunta de verificacion.",
   activeProvider: "openai",
-  activeAvatarProvider: "readyplayerme",
+  activeAvatarProvider: "did",
   strictKnowledge: true,
   providers: {
     openai: { enabled: true, model: "gpt-realtime", apiKey: "" },
