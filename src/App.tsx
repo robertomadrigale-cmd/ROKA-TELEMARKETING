@@ -339,6 +339,8 @@ function avatarAssetUrl(src?: string) {
   return /^https?:\/\//i.test(src) ? `/api/avatar/proxy?url=${encodeURIComponent(src)}` : src;
 }
 
+const didDefaultAvatar = "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
+
 async function readJsonResponse(response: Response) {
   const text = await response.text();
   if (!text) return {};
@@ -478,6 +480,27 @@ export function App() {
     saveReadyPlayerAvatar(data.url);
   };
 
+  const getDidAvatarSource = () => settings.providers.did.agent || settings.providers.did.avatar || didDefaultAvatar;
+
+  const sendDidSpeech = async (text: string) => {
+    if (settings.activeAvatarProvider !== "did" || didStatus !== "connected" || !didStreamId || !didSessionId) {
+      return false;
+    }
+    setVoiceSource("openai");
+    const didRes = await fetch("/api/did/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        streamId: didStreamId,
+        sessionId: didSessionId,
+        text,
+      }),
+    });
+    const didData = await readJsonResponse(didRes);
+    if (!didRes.ok) throw new Error(didData.detail || didData.error || "D-ID no pudo hablar.");
+    return true;
+  };
+
   const speak = (text: string) => {
     if (!("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
@@ -527,20 +550,7 @@ export function App() {
       setMessages((current) => [...current, { id: Date.now() + 1, role: "assistant", text: answer }]);
       
       if (settings.activeAvatarProvider === "did" && didStatus === "connected" && didStreamId && didSessionId) {
-        setVoiceSource("openai");
-        void fetch("/api/did/speak", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            streamId: didStreamId,
-            sessionId: didSessionId,
-            text: answer
-          })
-        })
-          .then(async (didRes) => {
-            const didData = await readJsonResponse(didRes);
-            if (!didRes.ok) throw new Error(didData.detail || didData.error || "D-ID no pudo hablar.");
-          })
+        void sendDidSpeech(answer)
           .catch((didError) => {
             setVoiceSource("none");
             setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
@@ -675,6 +685,7 @@ export function App() {
       audio.autoplay = true;
       peer.ontrack = (event) => {
         audio.srcObject = event.streams[0];
+        audio.muted = settings.activeAvatarProvider === "did" && didStatus === "connected";
         void audio.play().catch(() => undefined);
       };
 
@@ -702,6 +713,17 @@ export function App() {
           const data = JSON.parse(event.data);
           if (data.type === "response.output_text.done" && data.text) {
             setMessages((current) => [...current, { id: Date.now(), role: "assistant", text: data.text }]);
+            void sendDidSpeech(data.text).catch((didError) => {
+              setVoiceSource("none");
+              setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
+            });
+          }
+          if (data.type === "response.audio_transcript.done" && data.transcript) {
+            setMessages((current) => [...current, { id: Date.now(), role: "assistant", text: data.transcript }]);
+            void sendDidSpeech(data.transcript).catch((didError) => {
+              setVoiceSource("none");
+              setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
+            });
           }
           if (data.type === "error") {
             setNotice(data.error?.message || "OpenAI Realtime devolvio error.");
@@ -760,7 +782,7 @@ export function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source_url: settings.providers.did.agent || settings.providers.did.avatar || "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg"
+          source_url: getDidAvatarSource()
         })
       });
       const streamData = await readJsonResponse(resStream);
@@ -954,6 +976,7 @@ export function App() {
             onSend={sendMessage}
             didStatus={didStatus}
             didVideoRef={didVideoRef}
+            didPoster={getDidAvatarSource()}
             onConnectDidStream={connectDidStream}
           />
         )}
@@ -1188,6 +1211,7 @@ function SessionView({
   onSend,
   didStatus,
   didVideoRef,
+  didPoster,
   onConnectDidStream,
 }: {
   activeProvider: (typeof providerCatalog)[number];
@@ -1210,6 +1234,7 @@ function SessionView({
   onSend: (event?: FormEvent) => void;
   didStatus: "disconnected" | "connecting" | "connected" | "error";
   didVideoRef: React.RefObject<HTMLVideoElement | null>;
+  didPoster: string;
   onConnectDidStream: () => void;
 }) {
   const currentAvatar = builtInAvatars.find((a) => a.id === selectedBuiltInAvatar) || builtInAvatars[0];
@@ -1260,6 +1285,7 @@ function SessionView({
                 className="avatar-video"
                 autoPlay
                 playsInline
+                poster={didPoster}
                 style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "12px", background: "#0f172a" }}
               />
             ) : (
