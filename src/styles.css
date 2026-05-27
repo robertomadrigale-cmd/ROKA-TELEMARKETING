@@ -965,6 +965,35 @@ input::placeholder { color: #475569; }
   background: rgba(251,191,36,0.08);
 }
 
+.did-debug-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(6,182,212,0.18);
+  border-radius: 10px;
+  background: rgba(6,182,212,0.05);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.did-debug-panel strong {
+  color: var(--text-2);
+}
+
+.did-debug-panel span,
+.did-debug-panel em {
+  overflow-wrap: anywhere;
+}
+
+.did-debug-panel em {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-style: normal;
+}
+
 /* ═══════════════════════════════════════
    PROVIDER MARKS / FACES
    ═══════════════════════════════════════ */
@@ -1591,7 +1620,8 @@ input::placeholder { color: #475569; }
   .avatar-stage,
   .avatar-actions,
   .avatar-loader-panel,
-  .avatar-url-capture {
+  .avatar-url-capture,
+  .did-debug-panel {
     grid-template-columns: 1fr;
   }
 }

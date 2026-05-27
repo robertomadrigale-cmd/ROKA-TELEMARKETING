@@ -80,6 +80,17 @@ type Message = {
   text: string;
 };
 
+type DidDebug = {
+  connection: string;
+  ice: string;
+  lastStep: string;
+  lastSpeech: string;
+  streamId: string;
+  sessionId: string;
+  video: string;
+  error: string;
+};
+
 type BackendHealth = {
   ok: boolean;
   livekit: boolean;
@@ -340,6 +351,16 @@ function avatarAssetUrl(src?: string) {
 }
 
 const didDefaultAvatar = "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
+const initialDidDebug: DidDebug = {
+  connection: "sin iniciar",
+  ice: "sin iniciar",
+  lastStep: "esperando Conectar D-ID",
+  lastSpeech: "sin hablar",
+  streamId: "",
+  sessionId: "",
+  video: "sin stream",
+  error: "",
+};
 
 async function readJsonResponse(response: Response) {
   const text = await response.text();
@@ -384,6 +405,7 @@ export function App() {
   const [didStatus, setDidStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
   const [didStreamId, setDidStreamId] = useState<string>("");
   const [didSessionId, setDidSessionId] = useState<string>("");
+  const [didDebug, setDidDebug] = useState<DidDebug>(initialDidDebug);
   const didVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const activeProvider = providerCatalog.find((provider) => provider.id === settings.activeProvider)!;
@@ -482,10 +504,22 @@ export function App() {
 
   const getDidAvatarSource = () => settings.providers.did.agent || settings.providers.did.avatar || didDefaultAvatar;
 
+  const updateDidDebug = (patch: Partial<DidDebug>) => {
+    setDidDebug((current) => ({ ...current, ...patch }));
+  };
+
   const sendDidSpeech = async (text: string) => {
     if (settings.activeAvatarProvider !== "did" || didStatus !== "connected" || !didStreamId || !didSessionId) {
+      updateDidDebug({
+        lastSpeech: "bloqueado: D-ID no conectado",
+        error: "No hay stream/session activos para hablar.",
+      });
       return false;
     }
+    updateDidDebug({
+      lastSpeech: `enviando texto (${text.length} chars)`,
+      error: "",
+    });
     setVoiceSource("openai");
     const didRes = await fetch("/api/did/speak", {
       method: "POST",
@@ -498,6 +532,7 @@ export function App() {
     });
     const didData = await readJsonResponse(didRes);
     if (!didRes.ok) throw new Error(didData.detail || didData.error || "D-ID no pudo hablar.");
+    updateDidDebug({ lastSpeech: "D-ID acepto el texto para hablar", error: "" });
     return true;
   };
 
@@ -760,6 +795,7 @@ export function App() {
         didPeerRef.current.close();
         didPeerRef.current = null;
       }
+      updateDidDebug({ ...initialDidDebug, lastStep: "desconectando D-ID" });
       if (didStreamId && didSessionId) {
         try {
           await fetch(`/api/did/stream/${didStreamId}`, {
@@ -772,11 +808,17 @@ export function App() {
       setDidStatus("disconnected");
       setDidStreamId("");
       setDidSessionId("");
+      updateDidDebug({ ...initialDidDebug, lastStep: "D-ID desconectado" });
       return;
     }
 
     setNotice("");
     setDidStatus("connecting");
+    updateDidDebug({
+      ...initialDidDebug,
+      lastStep: "solicitando stream a D-ID",
+      video: "esperando stream",
+    });
     try {
       const resStream = await fetch("/api/did/stream", {
         method: "POST",
@@ -791,6 +833,11 @@ export function App() {
       const { id: streamId, session_id: sessionId, offer, ice_servers } = streamData;
       setDidStreamId(streamId);
       setDidSessionId(sessionId);
+      updateDidDebug({
+        lastStep: "stream creado; preparando WebRTC",
+        streamId: streamId ? `${streamId}`.slice(0, 10) : "",
+        sessionId: sessionId ? `${sessionId}`.slice(0, 10) : "",
+      });
 
       const peer = new RTCPeerConnection({
         iceServers: ice_servers
@@ -803,27 +850,40 @@ export function App() {
           didVideoRef.current.volume = 1;
           didVideoRef.current.play().catch(() => undefined);
           setDidStatus("connected");
+          updateDidDebug({
+            lastStep: "video recibido desde D-ID",
+            video: "stream recibido",
+            connection: peer.connectionState,
+            ice: peer.iceConnectionState,
+            error: "",
+          });
+        }
+      };
+
+      peer.onconnectionstatechange = () => {
+        updateDidDebug({ connection: peer.connectionState });
+        if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
+          updateDidDebug({ error: `WebRTC ${peer.connectionState}` });
         }
       };
 
       peer.oniceconnectionstatechange = () => {
+        updateDidDebug({ ice: peer.iceConnectionState, lastStep: `ICE ${peer.iceConnectionState}` });
         if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
           setTimeout(() => {
-            fetch("/api/did/speak", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                streamId,
-                sessionId,
-                text: "Hola, estoy conectado y listo."
-              })
-            }).catch(console.error);
+            void sendDidSpeech("Hola, estoy conectado y listo.").catch((didError) => {
+              updateDidDebug({
+                lastSpeech: "fallo saludo inicial",
+                error: didError instanceof Error ? didError.message : "D-ID no pudo hablar.",
+              });
+            });
           }, 500);
         }
       };
 
       peer.onicecandidate = async (event) => {
         if (event.candidate) {
+          updateDidDebug({ lastStep: "enviando candidato ICE" });
           try {
             await fetch("/api/did/ice", {
               method: "POST",
@@ -838,15 +898,21 @@ export function App() {
                 }
               })
             });
-          } catch { /* noop */ }
+          } catch (iceError) {
+            updateDidDebug({
+              error: iceError instanceof Error ? iceError.message : "Fallo enviando ICE",
+            });
+          }
         }
       };
 
+      updateDidDebug({ lastStep: "aplicando offer remota" });
       await peer.setRemoteDescription(new RTCSessionDescription(offer));
 
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
 
+      updateDidDebug({ lastStep: "enviando SDP answer" });
       const resSdp = await fetch("/api/did/sdp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -865,9 +931,12 @@ export function App() {
       }
 
       didPeerRef.current = peer;
+      updateDidDebug({ lastStep: "SDP aceptado; esperando video" });
     } catch (error) {
       setDidStatus("error");
-      setNotice(error instanceof Error ? error.message : "Error al conectar D-ID WebRTC.");
+      const message = error instanceof Error ? error.message : "Error al conectar D-ID WebRTC.";
+      setNotice(message);
+      updateDidDebug({ lastStep: "fallo conexion D-ID", error: message });
     }
   };
  
@@ -977,6 +1046,7 @@ export function App() {
             didStatus={didStatus}
             didVideoRef={didVideoRef}
             didPoster={getDidAvatarSource()}
+            didDebug={didDebug}
             onConnectDidStream={connectDidStream}
           />
         )}
@@ -1212,6 +1282,7 @@ function SessionView({
   didStatus,
   didVideoRef,
   didPoster,
+  didDebug,
   onConnectDidStream,
 }: {
   activeProvider: (typeof providerCatalog)[number];
@@ -1235,6 +1306,7 @@ function SessionView({
   didStatus: "disconnected" | "connecting" | "connected" | "error";
   didVideoRef: React.RefObject<HTMLVideoElement | null>;
   didPoster: string;
+  didDebug: DidDebug;
   onConnectDidStream: () => void;
 }) {
   const currentAvatar = builtInAvatars.find((a) => a.id === selectedBuiltInAvatar) || builtInAvatars[0];
@@ -1343,6 +1415,19 @@ function SessionView({
             Audio: {voiceSourceLabel(voiceSource)}
           </span>
         </div>
+
+        {settings.activeAvatarProvider === "did" && (
+          <div className="did-debug-panel">
+            <strong>Diagnostico D-ID</strong>
+            <span>Estado: {didStatus}</span>
+            <span>Paso: {didDebug.lastStep}</span>
+            <span>WebRTC: {didDebug.connection} / ICE: {didDebug.ice}</span>
+            <span>Video: {didDebug.video}</span>
+            <span>Habla: {didDebug.lastSpeech}</span>
+            <span>Stream: {didDebug.streamId || "sin id"} / Session: {didDebug.sessionId || "sin id"}</span>
+            {didDebug.error && <em>Error: {didDebug.error}</em>}
+          </div>
+        )}
 
         {/* ── Instructor Gallery (compact) ── */}
         <div className="gallery-section-title">
