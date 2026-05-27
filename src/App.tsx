@@ -828,7 +828,7 @@ export function App() {
         })
       });
       const streamData = await readJsonResponse(resStream);
-      if (!resStream.ok) throw new Error(streamData.error || streamData.detail || "Error al crear flujo en D-ID");
+      if (!resStream.ok) throw new Error(streamData.detail || streamData.error || "Error al crear flujo en D-ID");
 
       const { id: streamId, session_id: sessionId, offer, ice_servers } = streamData;
       setDidStreamId(streamId);
