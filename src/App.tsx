@@ -301,9 +301,9 @@ function loadSettings() {
     }
     const parsedTalkingHeadAvatar = parsed.providers?.talkinghead?.avatar || "";
     const activeAvatarProvider =
-      parsed.activeAvatarProvider === "talkinghead" && (!parsedTalkingHeadAvatar || parsedTalkingHeadAvatar.startsWith("builtin://"))
-        ? "readyplayerme"
-        : parsed.activeAvatarProvider || defaultSettings.activeAvatarProvider;
+      parsed.activeAvatarProvider === "did"
+        ? "did"
+        : defaultSettings.activeAvatarProvider;
     return {
       ...defaultSettings,
       ...parsed,
