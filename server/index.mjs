@@ -17,7 +17,7 @@ const serverDir = path.dirname(fileURLToPath(import.meta.url));
 const localConfigPath = path.join(serverDir, "provider-config.local.json");
 const localKnowledgePath = path.join(serverDir, "knowledge.local.json");
 const localAvatarDir = path.join(serverDir, "avatar-files.local");
-const providerKeys = ["livekit", "openai", "gemini", "elevenlabs", "heygen", "did", "talkinghead", "readyplayerme", "twilio", "whatsapp", "telegram"];
+const providerKeys = ["livekit", "openai", "gemini", "elevenlabs", "heygen", "did", "talkinghead", "readyplayerme", "twilio", "whatsapp", "telegram", "microsoft_phone_link"];
 const secretFields = new Set(["apiKey", "apiSecret", "webhookAuthToken", "apiKeySid", "apiKeySecret", "accountSid", "bridgeToken"]);
 const providerCatalog = {
   livekit: {
@@ -118,6 +118,15 @@ const providerCatalog = {
       defaultChatId: "Chat id por defecto",
     },
   },
+  microsoft_phone_link: {
+    name: "Microsoft Phone Link",
+    required: [],
+    fields: {
+      enabled: "Enabled",
+      provider: "Provider",
+      callerName: "Caller name",
+    },
+  },
 };
 const emptyProviderConfig = {
   livekit: { url: "", apiKey: "", apiSecret: "", agentName: "" },
@@ -156,6 +165,12 @@ const emptyProviderConfig = {
     apiKey: "",
     botToken: "",
     defaultChatId: "",
+  },
+  microsoft_phone_link: {
+    model: "phone-link",
+    enabled: true,
+    provider: "microsoft_phone_link",
+    callerName: "ROKA Agente",
   },
 };
 const envConfig = {
@@ -229,6 +244,12 @@ const envConfig = {
       apiKey: "",
       botToken: process.env.TELEGRAM_BOT_TOKEN || "",
       defaultChatId: process.env.TELEGRAM_DEFAULT_CHAT_ID || "",
+    },
+    microsoft_phone_link: {
+      model: "phone-link",
+      enabled: true,
+      provider: "microsoft_phone_link",
+      callerName: process.env.MS_PHONE_LINK_CALLER_NAME || "ROKA Agente",
     },
   },
 };
@@ -379,6 +400,7 @@ function getOrCreateConversation(input = {}) {
       assignedTo: input.assignedTo || defaultAgent,
       status: "new",
       lastChannel: input.channel || "voice",
+      lastProvider: input.provider || input.channel || "voice",
       lastDirection: input.direction || "inbound",
       events: [],
       createdAt: nowIso(),
@@ -395,6 +417,7 @@ function appendConversationEvent(input = {}) {
   const event = {
     id: `evt-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
     channel: input.channel || "voice",
+    provider: input.provider || input.channel || "voice",
     direction: input.direction || "inbound",
     status: input.status || "active",
     text: asString(input.text || "", 4000),
@@ -403,6 +426,7 @@ function appendConversationEvent(input = {}) {
   };
   conversation.events.push(event);
   conversation.lastChannel = event.channel;
+  conversation.lastProvider = event.provider;
   conversation.lastDirection = event.direction;
   conversation.status = input.forceStatus || event.status || conversation.status;
   conversation.updatedAt = nowIso();
@@ -987,14 +1011,16 @@ app.post("/api/telephony/personal-line/attempt", async (req, res) => {
       crmEntityType: asString(req.body?.crmEntityType || "contact", 40),
       crmEntityId: asString(req.body?.crmEntityId || "", 140) || undefined,
     };
+    const provider = asString(req.body?.provider || "microsoft_phone_link", 80);
     const conversation = appendConversationEvent({
       channel: "voice",
+      provider,
       direction: "outbound",
       status: "wrap_up_required",
       text: `Intento de llamada por linea personal a ${to}`,
       customerRef,
       metadata: {
-        lineType: "personal_phone_link",
+        lineType: provider,
         initiatedAt: nowIso(),
       },
     });
@@ -1010,7 +1036,8 @@ app.post("/api/telephony/personal-line/attempt", async (req, res) => {
         description: `Se inicio llamada personal (Phone Link) hacia ${to}.`,
         metadata: {
           channel: "voice",
-          lineType: "personal_phone_link",
+          provider,
+          lineType: provider,
           conversationId: conversation.id,
         },
       },
@@ -1019,6 +1046,50 @@ app.post("/api/telephony/personal-line/attempt", async (req, res) => {
     res.json({ ok: true, conversationId: conversation.id });
   } catch (error) {
     res.status(500).json({ error: "No se pudo registrar intento de linea personal.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/telephony/personal-line/outcome", async (req, res) => {
+  try {
+    const conversationId = asString(req.body?.conversationId, 120);
+    const outcome = asString(req.body?.outcome, 120);
+    const reason = asString(req.body?.reason, 300);
+    const notes = asString(req.body?.notes, 2000);
+    const row = Array.from(inboxState.conversations.values()).find((item) => item.id === conversationId);
+    if (!row) {
+      res.status(404).json({ error: "Conversacion no encontrada." });
+      return;
+    }
+    if (!outcome || !reason) {
+      res.status(400).json({ error: "outcome y reason son requeridos." });
+      return;
+    }
+    row.wrapUp = {
+      outcome,
+      reason,
+      notes,
+      followUpAt: asString(req.body?.followUpAt, 120) || null,
+      followUpType: asString(req.body?.followUpType, 120) || null,
+      closedAt: nowIso(),
+    };
+    row.status = "closed";
+    row.updatedAt = nowIso();
+    inboxState.conversations.set(row.customerKey, row);
+    const config = await getEffectiveConfig();
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: row.customerRef?.crmEntityType || "lead",
+        entityId: row.customerRef?.crmEntityId || row.customerRef?.phone || row.id,
+        activityType: "call",
+        title: "Outcome llamada (Microsoft Phone Link)",
+        description: `${outcome} - ${reason}. ${notes}`.trim(),
+        metadata: { channel: "voice", provider: "microsoft_phone_link", wrapUp: row.wrapUp, conversationId: row.id },
+      },
+    });
+    res.json({ ok: true, item: row });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo registrar outcome de linea personal.", detail: error instanceof Error ? error.message : "Error desconocido" });
   }
 });
 
@@ -1176,7 +1247,25 @@ app.post("/api/crm/search-customer", async (req, res) => {
     res.status(400).json(result);
     return;
   }
-  res.json(result.data);
+  const q = query.toLowerCase();
+  const rows = Array.isArray(result.data?.results) ? result.data.results : [];
+  const scored = rows
+    .map((row) => {
+      const name = String(row?.name || "").toLowerCase();
+      const company = String(row?.company || row?.account || "").toLowerCase();
+      const email = String(row?.email || "").toLowerCase();
+      const phoneRow = normalizePhone(row?.phone || "");
+      let score = 0;
+      if (name.startsWith(q)) score += 50;
+      if (name.includes(q)) score += 25;
+      if (company.includes(q)) score += 20;
+      if (email.includes(q)) score += 20;
+      if (phoneRow && normalizePhone(query).length >= 5 && phoneRow.includes(normalizePhone(query))) score += 35;
+      if (String(row?.collection || "") === "contacts") score += 5;
+      return { ...row, _score: score };
+    })
+    .sort((a, b) => b._score - a._score);
+  res.json({ ...result.data, results: scored });
 });
 
 app.post("/api/messages/whatsapp/send", async (req, res) => {
@@ -1348,8 +1437,12 @@ app.post("/api/messages/telegram/set-webhook", async (req, res) => {
 
 app.post("/api/inbox/list", async (req, res) => {
   const statusFilter = asString(req.body?.status || "", 80);
+  const agentFilter = asString(req.body?.assignedTo || req.body?.agent || "", 120).toLowerCase();
+  const channelFilter = asString(req.body?.channel || "", 40).toLowerCase();
   const items = Array.from(inboxState.conversations.values())
     .filter((row) => (statusFilter ? row.status === statusFilter : true))
+    .filter((row) => (agentFilter ? String(row.assignedTo || "").toLowerCase().includes(agentFilter) : true))
+    .filter((row) => (channelFilter ? String(row.lastChannel || "").toLowerCase() === channelFilter : true))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   res.json({ items });
 });

@@ -10,36 +10,51 @@ type CallStatus = "idle" | "ready" | "ringing" | "in-call" | "ended" | "error";
 type CrmContact = { id: string; name?: string; email?: string; phone?: string; account?: string; company?: string; collection?: string };
 type InboxConversation = { id: string; customerKey: string; status: string; assignedTo: string; lastChannel: string; events: Array<{ id: string; text: string; direction: string; channel: string }> };
 type ScriptDraft = { opening: string; discovery: string; objectionHandling: string; closing: string; nextSteps: string };
+type ProviderConfig = {
+  enabled?: boolean;
+  model?: string;
+  accountSid?: string;
+  apiKeySid?: string;
+  apiKeySecret?: string;
+  twimlAppSid?: string;
+  phoneNumber?: string;
+  webhookAuthToken?: string;
+  crmBridgeUrl?: string;
+  bridgeToken?: string;
+  organizationId?: string;
+  allowedOrigins?: string;
+  provider?: string;
+  from?: string;
+  botToken?: string;
+  defaultChatId?: string;
+  apiKey?: string;
+  voice?: string;
+  [key: string]: unknown;
+};
+
 type AppSettings = {
   company: string;
-  activeProvider: "openai";
-  providers: Record<ProviderId, {
-    enabled?: boolean;
-    model?: string;
-    accountSid?: string;
-    apiKeySid?: string;
-    apiKeySecret?: string;
-    twimlAppSid?: string;
-    phoneNumber?: string;
-    webhookAuthToken?: string;
-    crmBridgeUrl?: string;
-    bridgeToken?: string;
-    organizationId?: string;
-    allowedOrigins?: string;
-    provider?: string;
-    from?: string;
-    botToken?: string;
-    defaultChatId?: string;
-  }>;
+  activeProvider: string;
+  providers: Record<string, ProviderConfig>;
+  [key: string]: unknown;
 };
 
 const defaultSettings: AppSettings = {
   company: "ROKA",
   activeProvider: "openai",
   providers: {
-    twilio: { model: "voice-central", callerName: "ROKA Agente" } as any,
+    twilio: {
+      model: "voice-central",
+      callerName: "ROKA Agente",
+      crmBridgeUrl: "https://agencycrmbridge-uqt2333mca-uc.a.run.app",
+      organizationId: "roka-crm-c437f",
+      allowedOrigins: "https://roka-telemarketing.web.app",
+    } as any,
     whatsapp: { model: "messaging", provider: "twilio", from: "" },
     telegram: { model: "messaging", botToken: "", defaultChatId: "" },
+    openai: { model: "gpt-realtime", apiKey: "" },
+    gemini: { model: "gemini-live-2.5-flash-preview", apiKey: "" },
+    elevenlabs: { model: "eleven_turbo_v2_5", apiKey: "", voice: "" },
   },
 };
 
@@ -47,6 +62,7 @@ async function readJson(response: Response) {
   const text = await response.text();
   try { return JSON.parse(text || "{}"); } catch { return { raw: text }; }
 }
+const BUILD_STAMP = "build-2026-05-27-13:55";
 
 export default function App() {
   const [section, setSection] = useState<Section>("conversations");
@@ -57,8 +73,10 @@ export default function App() {
   const [contacts, setContacts] = useState<CrmContact[]>([]);
   const [contactQuery, setContactQuery] = useState("");
   const [selectedCustomer, setSelectedCustomer] = useState<CrmContact | null>(null);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxConversation[]>([]);
   const [selectedConvId, setSelectedConvId] = useState("");
+  const [agentFilter, setAgentFilter] = useState("roka-agent-1");
   const [replyText, setReplyText] = useState("");
   const [wrapOutcome, setWrapOutcome] = useState("");
   const [wrapReason, setWrapReason] = useState("");
@@ -70,10 +88,27 @@ export default function App() {
   const [tgChatId, setTgChatId] = useState("");
   const [tgText, setTgText] = useState("");
   const [scriptDraft, setScriptDraft] = useState<ScriptDraft>({ opening: "", discovery: "", objectionHandling: "", closing: "", nextSteps: "" });
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [powerDialerQueue, setPowerDialerQueue] = useState<CrmContact[]>([]);
+  const [powerDialerIndex, setPowerDialerIndex] = useState(0);
   const twilioDeviceRef = useRef<TwilioDevice | null>(null);
   const twilioCallSidRef = useRef("");
 
   const selectedConversation = useMemo(() => inboxItems.find((item) => item.id === selectedConvId) || null, [inboxItems, selectedConvId]);
+  const filteredInboxItems = useMemo(() => {
+    if (!agentFilter.trim()) return inboxItems;
+    return inboxItems.filter((item) => String(item.assignedTo || "").toLowerCase().includes(agentFilter.toLowerCase()));
+  }, [inboxItems, agentFilter]);
+  const activeDialerContact = powerDialerQueue[powerDialerIndex] || null;
+
+  async function runAction<T>(key: string, action: () => Promise<T>) {
+    setPending((p) => ({ ...p, [key]: true }));
+    try {
+      return await action();
+    } finally {
+      setPending((p) => ({ ...p, [key]: false }));
+    }
+  }
 
   useEffect(() => {
     void boot();
@@ -89,7 +124,28 @@ export default function App() {
   async function loadConfig() {
     const res = await fetch("/api/config");
     const data = await readJson(res);
-    if (res.ok) setSettings((prev) => ({ ...prev, ...data }));
+    if (!res.ok) return;
+    const remoteConfig = (data?.config && typeof data.config === "object") ? data.config : data;
+    setSettings((prev) => ({
+      ...prev,
+      ...(remoteConfig || {}),
+      providers: {
+        ...prev.providers,
+        ...((remoteConfig?.providers || {}) as Record<string, ProviderConfig>),
+        twilio: {
+          ...(prev.providers.twilio || {}),
+          ...((remoteConfig?.providers?.twilio || {}) as ProviderConfig),
+        },
+        whatsapp: {
+          ...(prev.providers.whatsapp || {}),
+          ...((remoteConfig?.providers?.whatsapp || {}) as ProviderConfig),
+        },
+        telegram: {
+          ...(prev.providers.telegram || {}),
+          ...((remoteConfig?.providers?.telegram || {}) as ProviderConfig),
+        },
+      },
+    }));
   }
 
   async function saveConfig() {
@@ -145,12 +201,26 @@ export default function App() {
         ? data.results
         : [];
     setContacts(list);
+    if (list.length > 0 && powerDialerQueue.length === 0) {
+      setPowerDialerQueue(list.slice(0, 50));
+      setPowerDialerIndex(0);
+    }
   }
 
   async function loadInbox() {
     const res = await fetch("/api/inbox/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 80 }) });
     const data = await readJson(res);
-    if (res.ok) setInboxItems(Array.isArray(data.items) ? data.items : []);
+    if (res.ok) {
+      const items = Array.isArray(data.items) ? data.items : [];
+      if (items.length === 0) {
+        await fetch("/api/dev/seed-inbox", { method: "POST" });
+        const second = await fetch("/api/inbox/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 80 }) });
+        const secondData = await readJson(second);
+        setInboxItems(Array.isArray(secondData.items) ? secondData.items : []);
+        return;
+      }
+      setInboxItems(items);
+    }
   }
 
   async function assignConversation(id: string) {
@@ -208,13 +278,20 @@ export default function App() {
   }
 
   async function searchCustomer() {
-    if (!dialNumber.trim()) return;
-    const res = await fetch("/api/crm/search-customer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: dialNumber }) });
+    const query = customerSearchQuery.trim() || dialNumber.trim();
+    if (!query) return;
+    const res = await fetch("/api/crm/search-customer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
     const data = await readJson(res);
     if (!res.ok) { setNotice(data.error || "No se pudo buscar cliente."); return; }
-    const first = Array.isArray(data.results) ? data.results[0] : null;
-    setSelectedCustomer(first);
-    if (first) setNotice(`Cliente encontrado: ${first.name || first.id}`);
+    const results = Array.isArray(data.results) ? data.results : [];
+    if (results.length === 0) {
+      setNotice("No se encontraron clientes.");
+      return;
+    }
+    setContacts(results);
+    setSelectedCustomer(results[0]);
+    setDialNumber(String(results[0].phone || ""));
+    setNotice(`Se encontraron ${results.length} clientes. Revisa Contactos para elegir.`);
   }
 
   async function startOutboundCall() {
@@ -244,6 +321,31 @@ export default function App() {
     await fetch("/api/telephony/call/hangup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid }) });
     setCallStatus("ended");
     twilioCallSidRef.current = "";
+  }
+
+  async function startPersonalPhoneLinkCall() {
+    const to = dialNumber.trim();
+    if (!to) {
+      setNotice("Captura un número para usar tu línea personal.");
+      return;
+    }
+    const safe = encodeURIComponent(to);
+    window.open(`https://dialer.skype.com/?number=${safe}`, "_blank", "noopener,noreferrer");
+    await fetch("/api/telephony/personal-line/attempt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to,
+        provider: "microsoft-phone-link",
+        note: "Intento de llamada desde línea personal (Phone Link / marcador del sistema).",
+        customerRef: {
+          phone: to,
+          crmEntityType: "contact",
+          crmEntityId: selectedCustomer?.id || "",
+        },
+      }),
+    });
+    setNotice("Se abrió marcador externo. Registra resultado en wrap-up.");
   }
 
   async function sendWhatsApp() {
@@ -294,11 +396,40 @@ export default function App() {
     });
   }
 
+  async function loadDialerQueue() {
+    const q = customerSearchQuery || contactQuery || "";
+    const endpoint = q.trim() ? "/api/crm/search-customer" : "/api/crm/contacts";
+    const body = q.trim() ? { query: q.trim(), limitPerCollection: 100 } : { limit: 100, query: "" };
+    const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await readJson(res);
+    if (!res.ok) {
+      setNotice(data.error || "No se pudo cargar cola de marcación.");
+      return;
+    }
+    const list = Array.isArray(data.items) ? data.items : Array.isArray(data.results) ? data.results : [];
+    setContacts(list);
+    if (list.length > 0) {
+      setPowerDialerQueue(list.slice(0, 50));
+      setPowerDialerIndex(0);
+      setSelectedCustomer(list[0]);
+      setDialNumber(String(list[0].phone || ""));
+    }
+  }
+
+  function dialerNext() {
+    if (powerDialerQueue.length === 0) return;
+    const next = Math.min(powerDialerIndex + 1, powerDialerQueue.length - 1);
+    setPowerDialerIndex(next);
+    const row = powerDialerQueue[next];
+    setSelectedCustomer(row);
+    setDialNumber(String(row.phone || ""));
+  }
+
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><div className="brand-mark">R</div><div><strong>ROKA</strong><span>Telemarketing Center</span></div></div>
-        <nav className="nav-list">
+    <main className="product-shell">
+      <aside className="rail">
+        <div className="brand"><div className="brand-icon">R</div><div><strong>ROKA</strong><span>Telemarketing Center</span></div></div>
+        <nav>
           {([
             ["conversations", MessageSquare, "Conversaciones"],
             ["calls", Phone, "Llamadas"],
@@ -310,19 +441,26 @@ export default function App() {
             ["providers", Settings, "Canales"],
             ["settings", Settings, "Configuración"],
           ] as Array<[Section, ComponentType<{ size?: number }>, string]>).map(([id, Icon, label]) => (
-            <button key={id} className={section === id ? "nav-item active" : "nav-item"} type="button" onClick={() => setSection(id as Section)}>
+            <button key={id} className={section === id ? "rail-link active" : "rail-link"} type="button" onClick={() => setSection(id as Section)}>
               <Icon size={18} /><span>{label}</span>
             </button>
           ))}
         </nav>
+        <div className="rail-status">
+          <span className="dot ok" />
+          <div>
+            <strong>Backend activo</strong>
+            <span>Telemarketing omnicanal</span>
+          </div>
+        </div>
       </aside>
 
-      <section className="workspace">
-        <header className="topbar">
-          <h1>ROKA</h1>
+      <section className="main-area">
+        <header className="app-header">
+          <h1>ROKA <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>{BUILD_STAMP}</span></h1>
           <div className="header-actions">
-            {!authUser ? <button className="secondary-action" onClick={() => void signInGoogle()} disabled={authBusy}>Entrar con Google</button> : <button className="secondary-action" onClick={() => void signOutGoogle()}>Salir ({authUser.email})</button>}
-            <button className="primary-action" onClick={() => void saveConfig()}><Save size={16} />Guardar</button>
+            {!authUser ? <button className="secondary-action" onClick={() => void runAction("google-login", signInGoogle)} disabled={authBusy || pending["google-login"]}>{pending["google-login"] ? "Conectando..." : "Entrar con Google"}</button> : <button className="secondary-action" onClick={() => void runAction("google-logout", signOutGoogle)}>{pending["google-logout"] ? "Saliendo..." : `Salir (${authUser.email})`}</button>}
+            <button className="primary-action" onClick={() => void runAction("save-config", saveConfig)} disabled={pending["save-config"]}><Save size={16} />{pending["save-config"] ? "Guardando..." : "Guardar"}</button>
           </div>
         </header>
 
@@ -342,12 +480,16 @@ export default function App() {
           <div className="ops-grid">
             <section className="ops-panel">
               <div className="panel-title"><div><p>Telefonía</p><h2>Llamadas</h2></div></div>
-              <div className="form-grid compact"><label>Número<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label></div>
+              <div className="form-grid compact">
+                <label>Buscar cliente (nombre, empresa, email o teléfono)<input value={customerSearchQuery} onChange={(e) => setCustomerSearchQuery(e.target.value)} placeholder="Buscar..." /></label>
+                <label>Número para llamar<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label>
+              </div>
               <div className="header-actions">
-                <button className="secondary-action" onClick={() => void connectTwilioDevice()}>Conectar</button>
-                <button className="secondary-action" onClick={() => void searchCustomer()}>Buscar cliente</button>
-                <button className="primary-action" onClick={() => void startOutboundCall()}>Llamar</button>
-                <button className="danger-action" onClick={() => void hangupCall()}>Colgar</button>
+                <button className="secondary-action" onClick={() => void runAction("twilio-connect", connectTwilioDevice)} disabled={pending["twilio-connect"]}>{pending["twilio-connect"] ? "Conectando..." : "Conectar"}</button>
+                <button className="secondary-action" onClick={() => void runAction("customer-search-calls", searchCustomer)} disabled={pending["customer-search-calls"]}>{pending["customer-search-calls"] ? "Buscando..." : "Buscar cliente"}</button>
+                <button className="primary-action" onClick={() => void runAction("call-outbound", startOutboundCall)} disabled={pending["call-outbound"]}>{pending["call-outbound"] ? "Llamando..." : "Llamar"}</button>
+                <button className="secondary-action" onClick={() => void runAction("call-personal", startPersonalPhoneLinkCall)} disabled={pending["call-personal"]}>{pending["call-personal"] ? "Abriendo..." : "Llamar con mi número"}</button>
+                <button className="danger-action" onClick={() => void runAction("call-hangup", hangupCall)} disabled={pending["call-hangup"]}>{pending["call-hangup"] ? "Colgando..." : "Colgar"}</button>
               </div>
               <p className="muted">Estado: {callStatus}</p>
             </section>
@@ -359,14 +501,42 @@ export default function App() {
         )}
 
         {section === "messages" && (
-          <div className="ops-grid">
+          <div className="ops-grid" style={{ gridTemplateColumns: "320px minmax(0,1fr) 360px" }}>
             <section className="ops-panel">
-              <div className="panel-title"><div><p>Canal</p><h2>WhatsApp</h2></div><button className="primary-action" onClick={() => void sendWhatsApp()}>Enviar</button></div>
-              <div className="assistant-editor"><label>Número destino<input value={waTo} onChange={(e) => setWaTo(e.target.value)} /></label><label>Mensaje<textarea value={waText} onChange={(e) => setWaText(e.target.value)} /></label></div>
+              <div className="panel-title"><div><p>Bandeja</p><h2>Chats por agente</h2></div><button className="secondary-action" onClick={() => void loadInbox()}>Actualizar</button></div>
+              <div className="form-grid"><label>Filtro agente asignado<input value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} placeholder="roka-agent-1" /></label></div>
+              <div className="data-table">
+                {filteredInboxItems.map((item) => (
+                  <article key={`msg-${item.id}`} onClick={() => setSelectedConvId(item.id)} style={{ cursor: "pointer", border: selectedConvId === item.id ? "1px solid var(--brand)" : undefined }}>
+                    <MessageSquare size={16} />
+                    <div>
+                      <strong>{item.customerKey}</strong>
+                      <span>{item.lastChannel} · {item.status} · {item.assignedTo || "sin asignar"}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
             </section>
             <section className="ops-panel">
-              <div className="panel-title"><div><p>Canal</p><h2>Telegram</h2></div><button className="primary-action" onClick={() => void sendTelegram()}>Enviar</button></div>
-              <div className="assistant-editor"><label>Chat ID<input value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} /></label><label>Mensaje<textarea value={tgText} onChange={(e) => setTgText(e.target.value)} /></label></div>
+              <div className="panel-title"><div><p>Chat</p><h2>{selectedConversation?.customerKey || "Selecciona conversación"}</h2></div></div>
+              <div className="message-list" style={{ minHeight: 280 }}>
+                {(selectedConversation?.events || []).map((m) => <article key={`msg-thread-${m.id}`} className={`msg ${m.direction === "outbound" ? "user" : "assistant"}`}><strong>{m.channel} · {m.direction}</strong><p>{m.text}</p></article>)}
+              </div>
+              <form className="composer" onSubmit={(e) => { e.preventDefault(); void runAction("send-reply", sendReply); }}>
+                <input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Escribe respuesta..." />
+                <button className="primary-action" type="submit" disabled={pending["send-reply"]}>{pending["send-reply"] ? "Enviando..." : "Enviar"}</button>
+              </form>
+            </section>
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Envío directo</p><h2>WhatsApp / Telegram</h2></div></div>
+              <div className="assistant-editor">
+                <label>WhatsApp destino<input value={waTo} onChange={(e) => setWaTo(e.target.value)} /></label>
+                <label>Mensaje WhatsApp<textarea value={waText} onChange={(e) => setWaText(e.target.value)} /></label>
+                <button className="primary-action" onClick={() => void runAction("send-whatsapp", sendWhatsApp)} type="button" disabled={pending["send-whatsapp"]}>{pending["send-whatsapp"] ? "Enviando..." : "Enviar WhatsApp"}</button>
+                <label>Telegram Chat ID<input value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} /></label>
+                <label>Mensaje Telegram<textarea value={tgText} onChange={(e) => setTgText(e.target.value)} /></label>
+                <button className="primary-action" onClick={() => void runAction("send-telegram", sendTelegram)} type="button" disabled={pending["send-telegram"]}>{pending["send-telegram"] ? "Enviando..." : "Enviar Telegram"}</button>
+              </div>
             </section>
           </div>
         )}
@@ -387,15 +557,16 @@ export default function App() {
         {section === "conversations" && (
           <div className="ops-grid">
             <section className="ops-panel">
-              <div className="panel-title"><div><p>Bandeja</p><h2>Conversaciones</h2></div><button className="secondary-action" onClick={() => void loadInbox()}>Actualizar</button></div>
+              <div className="panel-title"><div><p>Bandeja</p><h2>Conversaciones</h2></div><button className="secondary-action" onClick={() => void runAction("refresh-inbox", loadInbox)} disabled={pending["refresh-inbox"]}>{pending["refresh-inbox"] ? "Actualizando..." : "Actualizar"}</button></div>
+              <div className="form-grid"><label>Filtro agente asignado<input value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} placeholder="roka-agent-1" /></label></div>
               <div className="data-table">
-                {inboxItems.map((item) => <article key={item.id} onClick={() => setSelectedConvId(item.id)} style={{ cursor: "pointer" }}><MessageSquare size={16} /><div><strong>{item.customerKey}</strong><span>{item.lastChannel} · {item.status}</span></div><button className="secondary-action" onClick={(e) => { e.stopPropagation(); void assignConversation(item.id); }}>Asignar</button></article>)}
+                {filteredInboxItems.map((item) => <article key={item.id} onClick={() => setSelectedConvId(item.id)} style={{ cursor: "pointer" }}><MessageSquare size={16} /><div><strong>{item.customerKey}</strong><span>{item.lastChannel} · {item.status} · {item.assignedTo || "sin asignar"}</span></div><button className="secondary-action" onClick={(e) => { e.stopPropagation(); void assignConversation(item.id); }}>Asignar</button></article>)}
               </div>
             </section>
             <section className="ops-panel">
               <div className="panel-title"><div><p>Detalle</p><h2>{selectedConversation?.customerKey || "Selecciona conversación"}</h2></div></div>
               <div className="message-list">{(selectedConversation?.events || []).map((m) => <article key={m.id} className={`msg ${m.direction === "outbound" ? "user" : "assistant"}`}><strong>{m.channel}</strong><p>{m.text}</p></article>)}</div>
-              <form className="composer" onSubmit={(e) => { e.preventDefault(); void sendReply(); }}><input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Escribe respuesta..." /><button className="primary-action" type="submit">Enviar</button></form>
+              <form className="composer" onSubmit={(e) => { e.preventDefault(); void runAction("send-reply", sendReply); }}><input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Escribe respuesta..." /><button className="primary-action" type="submit" disabled={pending["send-reply"]}>{pending["send-reply"] ? "Enviando..." : "Enviar"}</button></form>
             </section>
             <section className="ops-panel">
               <div className="panel-title"><div><p>Wrap-up</p><h2>Cierre obligatorio</h2></div></div>
@@ -404,7 +575,7 @@ export default function App() {
                 <label>Reason<input value={wrapReason} onChange={(e) => setWrapReason(e.target.value)} /></label>
                 <label>Notas<textarea value={wrapNotes} onChange={(e) => setWrapNotes(e.target.value)} /></label>
               </div>
-              <button className="primary-action" onClick={() => void wrapUpConversation()} disabled={!selectedConversation}>Cerrar interacción</button>
+              <button className="primary-action" onClick={() => void runAction("wrapup", wrapUpConversation)} disabled={!selectedConversation || pending["wrapup"]}>{pending["wrapup"] ? "Cerrando..." : "Cerrar interacción"}</button>
             </section>
           </div>
         )}
@@ -422,12 +593,69 @@ export default function App() {
               <label>CRM Organization ID<input value={settings.providers.twilio.organizationId || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, organizationId: e.target.value } } }))} /></label>
               <label>WhatsApp From<input value={settings.providers.whatsapp.from || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, whatsapp: { ...s.providers.whatsapp, from: e.target.value } } }))} placeholder="whatsapp:+14155238886" /></label>
               <label>Telegram Bot Token<input type="password" value={settings.providers.telegram.botToken || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, telegram: { ...s.providers.telegram, botToken: e.target.value } } }))} /></label>
+              <label>Microsoft Phone Link (provider)<input value={String((settings.providers.microsoft_phone_link as any)?.provider || "microsoft_phone_link")} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, microsoft_phone_link: { ...(s.providers.microsoft_phone_link || {}), provider: e.target.value } } }))} /></label>
             </div>
           </section>
         )}
 
-        {(section === "settings" || section === "powerDialer" || section === "evaluations") && (
-          <section className="ops-panel"><h2>Este módulo está en transición</h2><p className="muted">Ya no contiene funciones de capacitación; lo terminamos en el siguiente ajuste.</p></section>
+        {section === "powerDialer" && (
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>Marcación</p><h2>Power Dialer</h2></div></div>
+            <div className="form-grid compact">
+              <label>Buscar cliente<input value={customerSearchQuery} onChange={(e) => setCustomerSearchQuery(e.target.value)} placeholder="Nombre, empresa, email o teléfono" /></label>
+              <label>Número<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label>
+            </div>
+            <div className="header-actions">
+              <button className="secondary-action" onClick={() => void runAction("dialer-search", searchCustomer)} disabled={pending["dialer-search"]}>{pending["dialer-search"] ? "Buscando..." : "Buscar"}</button>
+              <button className="primary-action" onClick={() => void runAction("dialer-call", startOutboundCall)} disabled={pending["dialer-call"]}>{pending["dialer-call"] ? "Llamando..." : "Llamar"}</button>
+              <button className="secondary-action" onClick={() => dialerNext()} disabled={powerDialerQueue.length === 0}>Siguiente</button>
+              <button className="danger-action" onClick={() => void runAction("dialer-hangup", hangupCall)} disabled={pending["dialer-hangup"]}>{pending["dialer-hangup"] ? "Colgando..." : "Colgar"}</button>
+            </div>
+            <p className="muted">Contacto actual: {activeDialerContact?.name || "N/D"} ({powerDialerIndex + 1}/{Math.max(powerDialerQueue.length, 1)})</p>
+            <button className="secondary-action" onClick={() => void runAction("dialer-queue", loadDialerQueue)} disabled={pending["dialer-queue"]}>{pending["dialer-queue"] ? "Cargando..." : "Cargar cola CRM"}</button>
+            <p className="muted">Estado: {callStatus}</p>
+          </section>
+        )}
+
+        {section === "evaluations" && (
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>Calidad</p><h2>Resultados de interacciones</h2></div></div>
+            <div className="data-table">
+              {inboxItems.map((item) => (
+                <article key={`eval-${item.id}`}>
+                  <MessageSquare size={16} />
+                  <div>
+                    <strong>{item.customerKey}</strong>
+                    <span>{item.lastChannel} · {item.status}</span>
+                  </div>
+                  <span className="pill">{item.assignedTo || "sin asignar"}</span>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {section === "settings" && (
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>Sistema</p><h2>Configuración general</h2></div></div>
+            <div className="form-grid">
+              <label>Empresa<input value={settings.company} onChange={(e) => setSettings((s) => ({ ...s, company: e.target.value }))} /></label>
+              <label>CRM Bridge URL<input value={settings.providers.twilio.crmBridgeUrl || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, crmBridgeUrl: e.target.value } } }))} /></label>
+              <label>Organization ID<input value={settings.providers.twilio.organizationId || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, organizationId: e.target.value } } }))} /></label>
+              <label>OpenAI API Key<input type="password" value={(settings as any).providers?.openai?.apiKey || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, openai: { ...(s.providers?.openai || {}), apiKey: e.target.value } } }))} /></label>
+              <label>OpenAI Modelo<input value={(settings as any).providers?.openai?.model || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, openai: { ...(s.providers?.openai || {}), model: e.target.value } } }))} /></label>
+              <label>Gemini API Key<input type="password" value={(settings as any).providers?.gemini?.apiKey || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, gemini: { ...(s.providers?.gemini || {}), apiKey: e.target.value } } }))} /></label>
+              <label>Gemini Modelo<input value={(settings as any).providers?.gemini?.model || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, gemini: { ...(s.providers?.gemini || {}), model: e.target.value } } }))} /></label>
+              <label>ElevenLabs API Key<input type="password" value={(settings as any).providers?.elevenlabs?.apiKey || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, elevenlabs: { ...(s.providers?.elevenlabs || {}), apiKey: e.target.value } } }))} /></label>
+              <label>ElevenLabs Voz<input value={(settings as any).providers?.elevenlabs?.voice || ""} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, elevenlabs: { ...(s.providers?.elevenlabs || {}), voice: e.target.value } } }))} /></label>
+              <label>Microsoft Phone Link activo
+                <select value={String((settings as any).providers?.microsoft_phone_link?.enabled ?? true)} onChange={(e) => setSettings((s: any) => ({ ...s, providers: { ...s.providers, microsoft_phone_link: { ...(s.providers?.microsoft_phone_link || {}), enabled: e.target.value === "true" } } }))}>
+                  <option value="true">Activo</option>
+                  <option value="false">Inactivo</option>
+                </select>
+              </label>
+            </div>
+          </section>
         )}
       </section>
     </main>
