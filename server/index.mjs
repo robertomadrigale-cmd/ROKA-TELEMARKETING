@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import OpenAI from "openai";
+import twilio from "twilio";
 
 dotenv.config();
 
@@ -16,8 +17,8 @@ const serverDir = path.dirname(fileURLToPath(import.meta.url));
 const localConfigPath = path.join(serverDir, "provider-config.local.json");
 const localKnowledgePath = path.join(serverDir, "knowledge.local.json");
 const localAvatarDir = path.join(serverDir, "avatar-files.local");
-const providerKeys = ["livekit", "openai", "gemini", "elevenlabs", "heygen", "did", "talkinghead", "readyplayerme"];
-const secretFields = new Set(["apiKey", "apiSecret"]);
+const providerKeys = ["livekit", "openai", "gemini", "elevenlabs", "heygen", "did", "talkinghead", "readyplayerme", "twilio", "whatsapp", "telegram"];
+const secretFields = new Set(["apiKey", "apiSecret", "webhookAuthToken", "apiKeySid", "apiKeySecret", "accountSid", "bridgeToken"]);
 const providerCatalog = {
   livekit: {
     name: "LiveKit",
@@ -83,6 +84,40 @@ const providerCatalog = {
       avatar: "Ready Player Me avatar URL",
     },
   },
+  twilio: {
+    name: "Twilio Voice",
+    required: ["accountSid", "apiKeySid", "apiKeySecret", "twimlAppSid", "phoneNumber"],
+    fields: {
+      accountSid: "Twilio account SID",
+      apiKeySid: "Twilio API key SID",
+      apiKeySecret: "Twilio API key secret",
+      twimlAppSid: "Twilio TwiML App SID",
+      phoneNumber: "Twilio number",
+      webhookAuthToken: "Twilio webhook auth token",
+      callerName: "Caller name",
+      crmBridgeUrl: "CRM bridge URL",
+      bridgeToken: "CRM bridge token",
+      organizationId: "CRM organization id",
+      allowedOrigins: "Allowed origins CSV",
+    },
+  },
+  whatsapp: {
+    name: "WhatsApp",
+    required: ["provider", "from"],
+    fields: {
+      provider: "Provider (twilio)",
+      from: "Numero origen WhatsApp",
+      apiKey: "API key/provider token",
+    },
+  },
+  telegram: {
+    name: "Telegram",
+    required: ["botToken"],
+    fields: {
+      botToken: "Telegram bot token",
+      defaultChatId: "Chat id por defecto",
+    },
+  },
 };
 const emptyProviderConfig = {
   livekit: { url: "", apiKey: "", apiSecret: "", agentName: "" },
@@ -93,6 +128,35 @@ const emptyProviderConfig = {
   did: { apiKey: "", agent: "" },
   talkinghead: { avatar: "" },
   readyplayerme: { avatar: "" },
+  twilio: {
+    model: "voice-central",
+    apiKey: "",
+    accountSid: "",
+    apiKeySid: "",
+    apiKeySecret: "",
+    twimlAppSid: "",
+    phoneNumber: "",
+    webhookAuthToken: "",
+    callerName: "ROKA Agente",
+    crmBridgeUrl: "",
+    bridgeToken: "",
+    organizationId: "",
+    allowedOrigins: "",
+  },
+  whatsapp: {
+    model: "messaging",
+    enabled: false,
+    apiKey: "",
+    provider: "twilio",
+    from: "",
+  },
+  telegram: {
+    model: "messaging",
+    enabled: false,
+    apiKey: "",
+    botToken: "",
+    defaultChatId: "",
+  },
 };
 const envConfig = {
   version: 1,
@@ -137,6 +201,35 @@ const envConfig = {
     readyplayerme: {
       avatar: process.env.READYPLAYERME_AVATAR || "",
     },
+    twilio: {
+      model: "voice-central",
+      apiKey: "",
+      accountSid: process.env.TWILIO_ACCOUNT_SID || "",
+      apiKeySid: process.env.TWILIO_API_KEY_SID || "",
+      apiKeySecret: process.env.TWILIO_API_KEY_SECRET || "",
+      twimlAppSid: process.env.TWILIO_TWIML_APP_SID || "",
+      phoneNumber: process.env.TWILIO_PHONE_NUMBER || "",
+      webhookAuthToken: process.env.TWILIO_WEBHOOK_AUTH_TOKEN || "",
+      callerName: process.env.TWILIO_CALLER_NAME || "ROKA Agente",
+      crmBridgeUrl: process.env.CRM_BRIDGE_URL || "",
+      bridgeToken: process.env.CRM_BRIDGE_TOKEN || "",
+      organizationId: process.env.CRM_ORGANIZATION_ID || "",
+      allowedOrigins: process.env.CRM_ALLOWED_ORIGINS || "",
+    },
+    whatsapp: {
+      model: "messaging",
+      enabled: false,
+      apiKey: process.env.WHATSAPP_API_KEY || "",
+      provider: process.env.WHATSAPP_PROVIDER || "twilio",
+      from: process.env.WHATSAPP_FROM || "",
+    },
+    telegram: {
+      model: "messaging",
+      enabled: false,
+      apiKey: "",
+      botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+      defaultChatId: process.env.TELEGRAM_DEFAULT_CHAT_ID || "",
+    },
   },
 };
 const starterKnowledge = [
@@ -165,9 +258,180 @@ app.use(express.text({ type: ["application/sdp", "text/plain"] }));
 app.use(express.raw({ type: "application/octet-stream", limit: "50mb" }));
 app.use(express.json({ limit: "10mb" }));
 
+const telephonyState = {
+  calls: new Map(),
+};
+const inboxState = {
+  conversations: new Map(),
+};
+const authState = {
+  firebaseIdToken: "",
+};
+
 function asString(value, maxLength = 4000) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, maxLength);
+}
+
+function getTwilioConfig(config) {
+  return config.providers?.twilio || {};
+}
+
+function createTwilioClient(config) {
+  const twilioConfig = getTwilioConfig(config);
+  if (!twilioConfig.accountSid || !twilioConfig.apiKeySid || !twilioConfig.apiKeySecret) return null;
+  return twilio(twilioConfig.apiKeySid, twilioConfig.apiKeySecret, { accountSid: twilioConfig.accountSid });
+}
+
+function parseAllowedOrigins(csvValue) {
+  return String(csvValue || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function originAllowed(twilioConfig, origin) {
+  const list = parseAllowedOrigins(twilioConfig.allowedOrigins);
+  if (list.length === 0) return true;
+  return list.includes(origin);
+}
+
+function normalizePhone(phone) {
+  return String(phone || "").replace(/[^\d+]/g, "").trim();
+}
+
+async function fetchCrmBridge(config, payload) {
+  const twilioConfig = getTwilioConfig(config);
+  if (!twilioConfig.crmBridgeUrl || !twilioConfig.organizationId) {
+    return { ok: false, error: "CRM bridge no configurado." };
+  }
+  try {
+    const headers = {
+      "Content-Type": "application/json",
+      "x-roka-local-link": "1",
+    };
+    if (twilioConfig.bridgeToken) {
+      headers["x-roka-crm-token"] = twilioConfig.bridgeToken;
+    }
+    if (authState.firebaseIdToken) {
+      headers.authorization = `Bearer ${authState.firebaseIdToken}`;
+    }
+    const response = await fetch(twilioConfig.crmBridgeUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        organizationId: twilioConfig.organizationId,
+        ...payload,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return { ok: false, error: data.error || "CRM bridge rechazo la solicitud.", data };
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Error CRM bridge." };
+  }
+}
+
+app.post("/api/auth/firebase/session", async (req, res) => {
+  const token = asString(req.body?.token, 6000);
+  if (!token) {
+    res.status(400).json({ error: "Token Firebase requerido." });
+    return;
+  }
+  authState.firebaseIdToken = token;
+  res.json({ ok: true });
+});
+
+app.delete("/api/auth/firebase/session", async (_req, res) => {
+  authState.firebaseIdToken = "";
+  res.json({ ok: true });
+});
+
+function upsertCallState(callSid, patch) {
+  const current = telephonyState.calls.get(callSid) || {};
+  const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  telephonyState.calls.set(callSid, next);
+  return next;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function inferCustomerKey(customerRef = {}) {
+  return customerRef.phone || customerRef.chatId || customerRef.crmEntityId || `unknown-${Date.now()}`;
+}
+
+function getOrCreateConversation(input = {}) {
+  const customerRef = input.customerRef || {};
+  const customerKey = inferCustomerKey(customerRef);
+  let conversation = inboxState.conversations.get(customerKey);
+  if (!conversation) {
+    conversation = {
+      id: `conv-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      customerKey,
+      customerRef,
+      assignedTo: input.assignedTo || "unassigned",
+      status: "new",
+      lastChannel: input.channel || "voice",
+      lastDirection: input.direction || "inbound",
+      events: [],
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      wrapUp: null,
+    };
+    inboxState.conversations.set(customerKey, conversation);
+  }
+  return conversation;
+}
+
+function appendConversationEvent(input = {}) {
+  const conversation = getOrCreateConversation(input);
+  const event = {
+    id: `evt-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+    channel: input.channel || "voice",
+    direction: input.direction || "inbound",
+    status: input.status || "active",
+    text: asString(input.text || "", 4000),
+    metadata: input.metadata || {},
+    createdAt: nowIso(),
+  };
+  conversation.events.push(event);
+  conversation.lastChannel = event.channel;
+  conversation.lastDirection = event.direction;
+  conversation.status = input.forceStatus || event.status || conversation.status;
+  conversation.updatedAt = nowIso();
+  inboxState.conversations.set(conversation.customerKey, conversation);
+  return conversation;
+}
+
+function serializeScriptResponse(outputText) {
+  const empty = {
+    opening: "",
+    discovery: "",
+    objectionHandling: "",
+    closing: "",
+    nextSteps: "",
+  };
+  if (!outputText) return empty;
+  try {
+    const parsed = JSON.parse(outputText);
+    return {
+      opening: asString(parsed.opening, 2000),
+      discovery: asString(parsed.discovery, 3000),
+      objectionHandling: asString(parsed.objectionHandling, 3000),
+      closing: asString(parsed.closing, 2000),
+      nextSteps: asString(parsed.nextSteps, 2000),
+    };
+  } catch {
+    return {
+      opening: outputText,
+      discovery: "",
+      objectionHandling: "",
+      closing: "",
+      nextSteps: "",
+    };
+  }
 }
 
 function parseEnvAssignments(text) {
@@ -388,6 +652,9 @@ app.get("/api/health", async (_req, res) => {
       elevenlabs: status.elevenlabs.configured,
       heygen: status.heygen.configured,
       did: status.did.configured,
+      twilio: status.twilio.configured,
+      whatsapp: status.whatsapp.configured,
+      telegram: status.telegram.configured,
       talkinghead: true,
       readyplayerme: true,
     },
@@ -584,6 +851,649 @@ app.post("/api/livekit/verify", async (_req, res) => {
       error: "LiveKit rechazo las credenciales.",
       detail: error instanceof Error ? error.message : "Error desconocido",
     });
+  }
+});
+
+app.post("/api/telephony/token", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const twilioConfig = getTwilioConfig(config);
+    const origin = String(req.get("origin") || "");
+    if (!originAllowed(twilioConfig, origin)) {
+      res.status(403).json({ error: "Origen no autorizado." });
+      return;
+    }
+    if (!twilioConfig.accountSid || !twilioConfig.apiKeySid || !twilioConfig.apiKeySecret || !twilioConfig.twimlAppSid) {
+      res.status(400).json({ error: "Twilio no esta configurado." });
+      return;
+    }
+    const identity = asString(req.body?.identity || `agente-${Date.now()}`, 80);
+    const voiceGrant = new twilio.jwt.AccessToken.VoiceGrant({
+      outgoingApplicationSid: twilioConfig.twimlAppSid,
+      incomingAllow: true,
+    });
+    const token = new twilio.jwt.AccessToken(
+      twilioConfig.accountSid,
+      twilioConfig.apiKeySid,
+      twilioConfig.apiKeySecret,
+      { identity, ttl: 3600 },
+    );
+    token.addGrant(voiceGrant);
+    res.json({ token: token.toJwt(), identity });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo crear token Twilio.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/telephony/call/outbound", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const client = createTwilioClient(config);
+    const twilioConfig = getTwilioConfig(config);
+    if (!client) {
+      res.status(400).json({ error: "Twilio no esta configurado." });
+      return;
+    }
+    const to = normalizePhone(req.body?.to);
+    if (!to) {
+      res.status(400).json({ error: "Numero destino invalido." });
+      return;
+    }
+    const from = normalizePhone(req.body?.from || twilioConfig.phoneNumber);
+    if (!from) {
+      res.status(400).json({ error: "Numero origen no configurado." });
+      return;
+    }
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const call = await client.calls.create({
+      to,
+      from,
+      url: `${baseUrl}/api/telephony/webhooks/voice?mode=outbound`,
+      statusCallback: `${baseUrl}/api/telephony/webhooks/status`,
+      statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+      statusCallbackMethod: "POST",
+    });
+  upsertCallState(call.sid, {
+      callSid: call.sid,
+      direction: "outbound",
+      to,
+      from,
+      status: call.status,
+      startedAt: new Date().toISOString(),
+      customerPhone: to,
+      customerName: asString(req.body?.customerName || "", 160),
+  });
+  const conversation = appendConversationEvent({
+    channel: "voice",
+    direction: "outbound",
+    status: "active",
+    text: `Llamada saliente iniciada a ${to}`,
+    customerRef: { phone: to },
+    metadata: { callSid: call.sid, status: call.status },
+  });
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: conversation.id,
+      customer_key: conversation.customerKey,
+      channel: "voice",
+      status: conversation.status,
+      assigned_to: conversation.assignedTo,
+      summary: `Llamada saliente iniciada a ${to}`,
+      metadata: { callSid: call.sid },
+    },
+  });
+  res.json({ ok: true, callSid: call.sid, status: call.status });
+  } catch (error) {
+    res.status(400).json({ error: "No se pudo originar la llamada.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/telephony/call/hangup", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const client = createTwilioClient(config);
+    if (!client) {
+      res.status(400).json({ error: "Twilio no esta configurado." });
+      return;
+    }
+    const callSid = asString(req.body?.callSid, 120);
+    if (!callSid) {
+      res.status(400).json({ error: "callSid es requerido." });
+      return;
+    }
+    await client.calls(callSid).update({ status: "completed" });
+    const saved = upsertCallState(callSid, { status: "completed", endedAt: new Date().toISOString() });
+    res.json({ ok: true, call: saved });
+  } catch (error) {
+    res.status(400).json({ error: "No se pudo colgar la llamada.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/telephony/webhooks/voice", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const twilioConfig = getTwilioConfig(config);
+  const signature = req.get("x-twilio-signature") || "";
+  const rawToken = asString(req.body?.token || req.query?.token || "", 300);
+  if (twilioConfig.webhookAuthToken && signature) {
+    const valid = twilio.validateRequest(twilioConfig.webhookAuthToken, signature, `${req.protocol}://${req.get("host")}${req.originalUrl}`, req.body || {});
+    if (!valid) {
+      res.status(403).type("text/plain").send("Invalid signature");
+      return;
+    }
+  } else if (twilioConfig.webhookAuthToken && rawToken !== twilioConfig.webhookAuthToken) {
+    res.status(403).type("text/plain").send("Invalid token");
+    return;
+  }
+
+  const voice = new twilio.twiml.VoiceResponse();
+  const callSid = asString(req.body?.CallSid, 120);
+  const from = normalizePhone(req.body?.From);
+  const to = normalizePhone(req.body?.To);
+  upsertCallState(callSid, {
+    callSid,
+    from,
+    to,
+    direction: req.body?.Direction || "inbound",
+    status: req.body?.CallStatus || "ringing",
+    customerPhone: from,
+    startedAt: new Date().toISOString(),
+  });
+  const conversation = appendConversationEvent({
+    channel: "voice",
+    direction: String(req.body?.Direction || "").toLowerCase().includes("outbound") ? "outbound" : "inbound",
+    status: "active",
+    text: `Nueva llamada ${req.body?.CallStatus || "ringing"}`,
+    customerRef: { phone: from || to },
+    metadata: { callSid, from, to },
+  });
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: conversation.id,
+      customer_key: conversation.customerKey,
+      channel: "voice",
+      status: conversation.status,
+      assigned_to: conversation.assignedTo,
+      summary: `Nueva llamada ${req.body?.CallStatus || "ringing"}`,
+      metadata: { callSid, from, to },
+    },
+  });
+  voice.say({ voice: "alice", language: "es-MX" }, "Gracias por llamar a ROKA. Conectando con un agente.");
+  voice.dial({ callerId: twilioConfig.phoneNumber || to, answerOnBridge: true }).client("roka-agent");
+  res.type("text/xml").send(voice.toString());
+});
+
+app.post("/api/telephony/webhooks/status", async (req, res) => {
+  const callSid = asString(req.body?.CallSid, 120);
+  const status = asString(req.body?.CallStatus, 80);
+  const duration = Number(req.body?.CallDuration || 0);
+  const customerPhone = normalizePhone(req.body?.From);
+  const saved = upsertCallState(callSid, {
+    status,
+    durationSec: duration,
+    endedAt: ["completed", "busy", "failed", "no-answer", "canceled"].includes(status) ? new Date().toISOString() : undefined,
+    customerPhone: customerPhone || undefined,
+  });
+  const conversation = appendConversationEvent({
+    channel: "voice",
+    direction: saved.direction || "inbound",
+    status: ["completed", "busy", "failed", "no-answer", "canceled"].includes(status) ? "wrap_up_required" : "active",
+    text: `Estado de llamada: ${status}`,
+    customerRef: { phone: saved.customerPhone || customerPhone },
+    metadata: { callSid, status, duration },
+  });
+  const config = await getEffectiveConfig();
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: conversation.id,
+      customer_key: conversation.customerKey,
+      channel: "voice",
+      status: conversation.status,
+      assigned_to: conversation.assignedTo,
+      summary: `Estado de llamada: ${status}`,
+      metadata: { callSid, status, duration },
+    },
+  });
+
+  if (["completed", "busy", "failed", "no-answer", "canceled"].includes(status)) {
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: saved.entityType || "lead",
+        entityId: saved.entityId || saved.customerPhone || callSid,
+        activityType: "call",
+        title: `Llamada ${saved.direction === "outbound" ? "saliente" : "entrante"} ${status}`,
+        description: `Duracion: ${duration}s. Telefono: ${saved.customerPhone || "N/D"}.`,
+        metadata: {
+          callSid,
+          status,
+          duration,
+          direction: saved.direction || "unknown",
+        },
+      },
+    });
+  }
+
+  res.json({ ok: true });
+});
+
+app.get("/api/telephony/calls/active", async (_req, res) => {
+  const active = Array.from(telephonyState.calls.values()).filter((call) => !["completed", "busy", "failed", "no-answer", "canceled"].includes(call.status));
+  res.json({ calls: active });
+});
+
+app.post("/api/crm/context/:entityType/:entityId", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const entityType = asString(req.params.entityType, 40);
+  const entityId = asString(req.params.entityId, 120);
+  const phoneHint = normalizePhone(req.body?.phone || "");
+  const result = await fetchCrmBridge(config, {
+    action: "context",
+    brief: {
+      entityType,
+      entityId,
+      phone: phoneHint,
+      query: [entityId, phoneHint].filter(Boolean).join(" "),
+    },
+    limitPerCollection: Number(req.body?.limitPerCollection || 8),
+  });
+  if (!result.ok) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result.data);
+});
+
+app.post("/api/crm/search-customer", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const phone = normalizePhone(req.body?.phone || "");
+  const query = asString(req.body?.query || phone, 180);
+  if (!query) {
+    res.status(400).json({ error: "query o phone es requerido." });
+    return;
+  }
+  const result = await fetchCrmBridge(config, {
+    action: "search",
+    query,
+    collections: ["leads", "contacts", "opportunities", "activities"],
+    limitPerCollection: Number(req.body?.limitPerCollection || 8),
+  });
+  if (!result.ok) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result.data);
+});
+
+app.post("/api/messages/whatsapp/send", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const wa = config.providers.whatsapp || {};
+    const twilioConfig = getTwilioConfig(config);
+    const to = normalizePhone(req.body?.to);
+    const text = asString(req.body?.text, 3000);
+    if (!to || !text) {
+      res.status(400).json({ error: "Destino y mensaje son requeridos." });
+      return;
+    }
+    if (String(wa.provider || "twilio") !== "twilio") {
+      res.status(400).json({ error: "Provider de WhatsApp no soportado en esta version." });
+      return;
+    }
+    const client = createTwilioClient(config);
+    if (!client) {
+      res.status(400).json({ error: "Twilio no esta configurado para WhatsApp." });
+      return;
+    }
+    const from = asString(wa.from || "", 80);
+    if (!from) {
+      res.status(400).json({ error: "Configura WHATSAPP_FROM en Settings." });
+      return;
+    }
+    const message = await client.messages.create({
+      from: from.startsWith("whatsapp:") ? from : `whatsapp:${from}`,
+      to: to.startsWith("whatsapp:") ? to : `whatsapp:${to}`,
+      body: text,
+    });
+
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: asString(req.body?.entityType || "contact", 40),
+        entityId: asString(req.body?.entityId || to, 140),
+        activityType: "email",
+        title: "Mensaje WhatsApp enviado",
+        description: text.slice(0, 500),
+        metadata: { channel: "whatsapp", sid: message.sid, to },
+      },
+    });
+    res.json({ ok: true, sid: message.sid, status: message.status });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo enviar WhatsApp.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/messages/telegram/send", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const telegram = config.providers.telegram || {};
+    const botToken = asString(telegram.botToken || "", 300);
+    const chatId = asString(req.body?.chatId || telegram.defaultChatId || "", 120);
+    const text = asString(req.body?.text, 3000);
+    if (!botToken || !chatId || !text) {
+      res.status(400).json({ error: "Faltan botToken, chatId o texto." });
+      return;
+    }
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) {
+      res.status(400).json({ error: data.description || "Telegram rechazo el mensaje." });
+      return;
+    }
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: asString(req.body?.entityType || "contact", 40),
+        entityId: asString(req.body?.entityId || chatId, 140),
+        activityType: "email",
+        title: "Mensaje Telegram enviado",
+        description: text.slice(0, 500),
+        metadata: { channel: "telegram", chatId, messageId: data.result?.message_id || null },
+      },
+    });
+    res.json({ ok: true, result: data.result || null });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo enviar Telegram.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/messages/whatsapp/webhook", async (req, res) => {
+  const from = normalizePhone(req.body?.From || "");
+  const to = normalizePhone(req.body?.To || "");
+  const body = asString(req.body?.Body || "", 4000);
+  const status = asString(req.body?.MessageStatus || "received", 80);
+  const conversation = appendConversationEvent({
+    channel: "whatsapp",
+    direction: "inbound",
+    status: status === "received" ? "active" : "waiting",
+    text: body,
+    customerRef: { phone: from },
+    metadata: { from, to, sid: req.body?.MessageSid || null },
+  });
+  const config = await getEffectiveConfig();
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: conversation.id,
+      customer_key: conversation.customerKey,
+      channel: "whatsapp",
+      status: conversation.status,
+      assigned_to: conversation.assignedTo,
+      summary: body,
+    },
+  });
+  res.type("text/xml").send("<Response></Response>");
+});
+
+app.post("/api/messages/telegram/webhook", async (req, res) => {
+  const message = req.body?.message || req.body?.edited_message || null;
+  if (!message) {
+    res.json({ ok: true });
+    return;
+  }
+  const chatId = String(message.chat?.id || "");
+  const text = asString(message.text || "", 4000);
+  const conversation = appendConversationEvent({
+    channel: "telegram",
+    direction: "inbound",
+    status: "active",
+    text,
+    customerRef: { chatId },
+    metadata: { messageId: message.message_id || null, username: message.from?.username || "" },
+  });
+  const config = await getEffectiveConfig();
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: conversation.id,
+      customer_key: conversation.customerKey,
+      channel: "telegram",
+      status: conversation.status,
+      assigned_to: conversation.assignedTo,
+      summary: text,
+    },
+  });
+  res.json({ ok: true });
+});
+
+app.post("/api/messages/telegram/set-webhook", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const telegram = config.providers.telegram || {};
+  const botToken = asString(telegram.botToken || "", 300);
+  const webhookUrl = asString(req.body?.webhookUrl || "", 1000);
+  if (!botToken || !webhookUrl) {
+    res.status(400).json({ error: "Faltan botToken o webhookUrl." });
+    return;
+  }
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: webhookUrl }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    res.status(400).json({ error: data.description || "No se pudo registrar webhook de Telegram." });
+    return;
+  }
+  res.json({ ok: true, result: data.result || null });
+});
+
+app.post("/api/inbox/list", async (req, res) => {
+  const statusFilter = asString(req.body?.status || "", 80);
+  const items = Array.from(inboxState.conversations.values())
+    .filter((row) => (statusFilter ? row.status === statusFilter : true))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  res.json({ items });
+});
+
+app.post("/api/inbox/assign", async (req, res) => {
+  const conversationId = asString(req.body?.conversationId, 120);
+  const assignedTo = asString(req.body?.assignedTo, 120) || "unassigned";
+  const row = Array.from(inboxState.conversations.values()).find((item) => item.id === conversationId);
+  if (!row) {
+    res.status(404).json({ error: "Conversacion no encontrada." });
+    return;
+  }
+  row.assignedTo = assignedTo;
+  row.updatedAt = nowIso();
+  inboxState.conversations.set(row.customerKey, row);
+  res.json({ ok: true, item: row });
+});
+
+app.post("/api/inbox/:id/messages", async (req, res) => {
+  const id = asString(req.params.id, 120);
+  const text = asString(req.body?.text, 4000);
+  const channel = asString(req.body?.channel || "whatsapp", 40);
+  const direction = asString(req.body?.direction || "outbound", 40);
+  const row = Array.from(inboxState.conversations.values()).find((item) => item.id === id);
+  if (!row) {
+    res.status(404).json({ error: "Conversacion no encontrada." });
+    return;
+  }
+  const updated = appendConversationEvent({
+    channel,
+    direction,
+    status: "active",
+    text,
+    customerRef: row.customerRef,
+    metadata: req.body?.metadata || {},
+  });
+  const config = await getEffectiveConfig();
+  await fetchCrmBridge(config, {
+    action: "upsertConversation",
+    conversation: {
+      external_id: updated.id,
+      customer_key: updated.customerKey,
+      channel,
+      status: updated.status,
+      assigned_to: updated.assignedTo,
+      summary: text,
+      metadata: req.body?.metadata || {},
+    },
+  });
+  res.json({ ok: true, item: updated });
+});
+
+app.post("/api/inbox/:id/wrapup", async (req, res) => {
+  const id = asString(req.params.id, 120);
+  const row = Array.from(inboxState.conversations.values()).find((item) => item.id === id);
+  if (!row) {
+    res.status(404).json({ error: "Conversacion no encontrada." });
+    return;
+  }
+  const outcome = asString(req.body?.outcome, 120);
+  const reason = asString(req.body?.reason, 300);
+  const notes = asString(req.body?.notes, 2000);
+  if (!outcome || !reason) {
+    res.status(400).json({ error: "Wrap-up obligatorio: outcome y reason son requeridos." });
+    return;
+  }
+  row.wrapUp = {
+    outcome,
+    reason,
+    notes,
+    followUpAt: asString(req.body?.followUpAt, 120) || null,
+    followUpType: asString(req.body?.followUpType, 120) || null,
+    closedAt: nowIso(),
+  };
+  row.status = "closed";
+  row.updatedAt = nowIso();
+  inboxState.conversations.set(row.customerKey, row);
+
+  const config = await getEffectiveConfig();
+  await fetchCrmBridge(config, {
+    action: "logActivity",
+    activity: {
+      entityType: row.customerRef?.crmEntityType || "lead",
+      entityId: row.customerRef?.crmEntityId || row.customerRef?.phone || row.customerRef?.chatId || row.id,
+      activityType: "call",
+      title: `Wrap-up ${row.lastChannel}`,
+      description: `${outcome} - ${reason}. ${notes}`,
+      metadata: { channel: row.lastChannel, wrapUp: row.wrapUp },
+    },
+  });
+  if (row.wrapUp.followUpAt) {
+    await fetchCrmBridge(config, {
+      action: "createFollowUpTask",
+      task: {
+        title: `Seguimiento ${row.lastChannel} - ${row.customerKey}`,
+        description: notes || `Outcome: ${outcome}. Reason: ${reason}`,
+        dueDate: row.wrapUp.followUpAt,
+        priority: "high",
+        createdBy: "roka-telemarketing",
+      },
+    });
+  }
+  res.json({ ok: true, item: row });
+});
+
+app.post("/api/dev/seed-inbox", async (_req, res) => {
+  const seed = [
+    {
+      channel: "voice",
+      direction: "inbound",
+      status: "wrap_up_required",
+      text: "Cliente llamo para cotizacion inicial.",
+      customerRef: { phone: "+526141112233", crmEntityType: "lead", crmEntityId: "lead-seed-001" },
+      metadata: { seed: true },
+    },
+    {
+      channel: "whatsapp",
+      direction: "inbound",
+      status: "active",
+      text: "Hola, me interesa saber precios.",
+      customerRef: { phone: "+526142224466", crmEntityType: "lead", crmEntityId: "lead-seed-002" },
+      metadata: { seed: true },
+    },
+    {
+      channel: "telegram",
+      direction: "inbound",
+      status: "waiting",
+      text: "Podemos agendar una demo?",
+      customerRef: { chatId: "99887766", crmEntityType: "contact", crmEntityId: "contact-seed-003" },
+      metadata: { seed: true },
+    },
+  ];
+  const created = seed.map((row) => appendConversationEvent(row));
+  res.json({ ok: true, count: created.length, items: created });
+});
+
+app.post("/api/script/generate", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const openaiConfig = config.providers.openai;
+    const customer = req.body?.customer || {};
+    const objective = asString(req.body?.objective || "Calificar al prospecto y avanzar al siguiente paso.", 2000);
+    const contextRows = Array.isArray(req.body?.contextRows) ? req.body.contextRows.slice(0, 20) : [];
+
+    if (!openaiConfig.apiKey || !openaiConfig.model) {
+      res.status(400).json({ error: "OpenAI no esta configurado para generar guion." });
+      return;
+    }
+
+    const client = new OpenAI({ apiKey: openaiConfig.apiKey });
+    const prompt = [
+      `Empresa: ${config.company}`,
+      `Objetivo comercial: ${objective}`,
+      `Cliente: ${JSON.stringify(customer)}`,
+      `Contexto CRM: ${JSON.stringify(contextRows)}`,
+      "Devuelve JSON con llaves exactas: opening, discovery, objectionHandling, closing, nextSteps.",
+      "Texto en espanol, concreto y profesional para llamada telefonica.",
+    ].join("\n");
+
+    const response = await client.responses.create({
+      model: openaiConfig.model,
+      input: [
+        { role: "system", content: "Eres un supervisor premium de telemarketing B2B/B2C." },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    const script = serializeScriptResponse(response.output_text || "");
+    res.json({ ok: true, script, raw: response.output_text || "" });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo generar guion.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
+app.post("/api/script/refine", async (req, res) => {
+  try {
+    const config = await getEffectiveConfig();
+    const openaiConfig = config.providers.openai;
+    if (!openaiConfig.apiKey || !openaiConfig.model) {
+      res.status(400).json({ error: "OpenAI no esta configurado para refinar guion." });
+      return;
+    }
+    const currentScript = req.body?.script || {};
+    const feedback = asString(req.body?.feedback || "Hazlo mas corto y enfocado a cierre.", 2000);
+    const client = new OpenAI({ apiKey: openaiConfig.apiKey });
+    const response = await client.responses.create({
+      model: openaiConfig.model,
+      input: [
+        { role: "system", content: "Refina guiones de telemarketing. Devuelve JSON estricto con opening, discovery, objectionHandling, closing, nextSteps." },
+        { role: "user", content: `Guion actual: ${JSON.stringify(currentScript)}\nFeedback: ${feedback}` },
+      ],
+    });
+    const script = serializeScriptResponse(response.output_text || "");
+    res.json({ ok: true, script, raw: response.output_text || "" });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo refinar guion.", detail: error instanceof Error ? error.message : "Error desconocido" });
   }
 });
 

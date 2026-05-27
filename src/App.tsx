@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Mic,
   MonitorPlay,
+  Phone,
   PlugZap,
   Radio,
   Save,
@@ -26,9 +27,12 @@ import {
 } from "lucide-react";
 import "@google/model-viewer";
 import { createLocalAudioTrack, Room } from "livekit-client";
+import { Device as TwilioDevice } from "@twilio/voice-sdk";
+import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/auth";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { firebaseAuth, googleProvider } from "./firebase";
 
-type Section = "session" | "knowledge" | "providers" | "settings";
+type Section = "conversations" | "calls" | "powerDialer" | "contacts" | "messages" | "scripts" | "evaluations" | "providers" | "settings";
 type Role = "assistant" | "user" | "system";
 type ProviderId =
   | "openai"
@@ -39,7 +43,10 @@ type ProviderId =
   | "livekit"
   | "pipecat"
   | "talkinghead"
-  | "readyplayerme";
+  | "readyplayerme"
+  | "twilio"
+  | "whatsapp"
+  | "telegram";
 type LiveKitStatus = "disconnected" | "connecting" | "connected" | "error";
 type RealtimeStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -53,6 +60,21 @@ type ProviderConfig = {
   agent?: string;
   apiSecret?: string;
   agentName?: string;
+  accountSid?: string;
+  apiKeySid?: string;
+  apiKeySecret?: string;
+  twimlAppSid?: string;
+  phoneNumber?: string;
+  webhookAuthToken?: string;
+  callerName?: string;
+  crmBridgeUrl?: string;
+  bridgeToken?: string;
+  organizationId?: string;
+  allowedOrigins?: string;
+  provider?: string;
+  from?: string;
+  botToken?: string;
+  defaultChatId?: string;
 };
 
 type AppSettings = {
@@ -91,6 +113,30 @@ type DidDebug = {
   error: string;
 };
 
+type CallStatus = "idle" | "ready" | "ringing" | "in-call" | "ended" | "error";
+
+type ScriptDraft = {
+  opening: string;
+  discovery: string;
+  objectionHandling: string;
+  closing: string;
+  nextSteps: string;
+};
+
+type InboxConversation = {
+  id: string;
+  customerKey: string;
+  customerRef: Record<string, unknown>;
+  assignedTo: string;
+  status: "new" | "active" | "waiting" | "wrap_up_required" | "closed";
+  lastChannel: "voice" | "whatsapp" | "telegram";
+  lastDirection: "inbound" | "outbound";
+  events: Array<{ id: string; text: string; channel: string; direction: string; createdAt: string; status: string }>;
+  wrapUp?: { outcome?: string; reason?: string; notes?: string; followUpAt?: string | null; followUpType?: string | null } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type BackendHealth = {
   ok: boolean;
   livekit: boolean;
@@ -105,6 +151,30 @@ const providerCatalog: Array<{
   defaultModel: string;
   needs: string[];
 }> = [
+  {
+    id: "twilio",
+    name: "Twilio Voice",
+    kind: "Telefonia",
+    use: "Llamadas entrantes y salientes PSTN para central de telemarketing.",
+    defaultModel: "voice-central",
+    needs: ["Account SID", "API Key SID", "API Key Secret", "TwiML App SID", "Numero"],
+  },
+  {
+    id: "whatsapp",
+    name: "WhatsApp",
+    kind: "Mensajeria",
+    use: "Envio de mensajes de seguimiento por WhatsApp.",
+    defaultModel: "messaging",
+    needs: ["Provider", "From number"],
+  },
+  {
+    id: "telegram",
+    name: "Telegram",
+    kind: "Mensajeria",
+    use: "Envio de mensajes operativos y comerciales por Telegram.",
+    defaultModel: "messaging",
+    needs: ["Bot token", "Chat ID"],
+  },
   {
     id: "openai",
     name: "OpenAI Realtime",
@@ -218,9 +288,9 @@ const builtInAvatars: BuiltInAvatar[] = [
 
 const defaultSettings: AppSettings = {
   company: "ROKA",
-  assistantName: "Instructor ROKA",
+  assistantName: "Agente ROKA",
   systemInstructions:
-    "Eres un asistente especializado en capacitacion. Usa la base de conocimiento recuperada por RAG. Si el modo estricto esta activo, no inventes informacion fuera de los documentos. Responde con pasos claros, ejemplos practicos y una pregunta de verificacion.",
+    "Eres un asistente especializado en telemarketing y seguimiento comercial. Crea guiones claros y accionables con base en CRM y la informacion del usuario.",
   activeProvider: "openai",
   activeAvatarProvider: "did",
   strictKnowledge: true,
@@ -232,6 +302,36 @@ const defaultSettings: AppSettings = {
     did: { enabled: false, model: "agents-v4", apiKey: "", agent: "" },
     talkinghead: { enabled: true, model: "talkinghead-web", apiKey: "", avatar: readyPlayerMeSampleAvatar },
     readyplayerme: { enabled: true, model: "rpm-avatar", apiKey: "", avatar: readyPlayerMeSampleAvatar },
+    twilio: {
+      enabled: false,
+      model: "voice-central",
+      apiKey: "",
+      accountSid: "",
+      apiKeySid: "",
+      apiKeySecret: "",
+      twimlAppSid: "",
+      phoneNumber: "",
+      webhookAuthToken: "",
+      callerName: "ROKA Agente",
+      crmBridgeUrl: "",
+      bridgeToken: "",
+      organizationId: "",
+      allowedOrigins: "",
+    },
+    whatsapp: {
+      enabled: false,
+      model: "messaging",
+      apiKey: "",
+      provider: "twilio",
+      from: "whatsapp:+14155238886",
+    },
+    telegram: {
+      enabled: false,
+      model: "messaging",
+      apiKey: "",
+      botToken: "",
+      defaultChatId: "",
+    },
     livekit: { enabled: false, model: "agent-dispatch", apiKey: "", apiSecret: "", url: "", agentName: "" },
     pipecat: { enabled: false, model: "pipeline-local", apiKey: "", url: "http://localhost:7860" },
   },
@@ -373,7 +473,7 @@ async function readJsonResponse(response: Response) {
 }
 
 export function App() {
-  const [section, setSection] = useState<Section>("settings");
+  const [section, setSection] = useState<Section>("conversations");
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>(starterKnowledge);
   const [messages, setMessages] = useState<Message[]>([
@@ -388,14 +488,39 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [avatarCreatorOpen, setAvatarCreatorOpen] = useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = useState(settings.providers.readyplayerme.avatar || "");
+  const [callStatus, setCallStatus] = useState<CallStatus>("idle");
+  const [dialNumber, setDialNumber] = useState("");
+  const [currentCallSid, setCurrentCallSid] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState<Record<string, unknown> | null>(null);
+  const [scriptDraft, setScriptDraft] = useState<ScriptDraft>({
+    opening: "",
+    discovery: "",
+    objectionHandling: "",
+    closing: "",
+    nextSteps: "",
+  });
+  const [waTo, setWaTo] = useState("");
+  const [waText, setWaText] = useState("");
+  const [tgChatId, setTgChatId] = useState("");
+  const [tgText, setTgText] = useState("");
+  const [inboxItems, setInboxItems] = useState<InboxConversation[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState("");
+  const [conversationReply, setConversationReply] = useState("");
+  const [wrapOutcome, setWrapOutcome] = useState("");
+  const [wrapReason, setWrapReason] = useState("");
+  const [wrapNotes, setWrapNotes] = useState("");
+  const [wrapFollowUpAt, setWrapFollowUpAt] = useState("");
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [selectedBuiltInAvatar, setSelectedBuiltInAvatar] = useState<string>(() => {
     try {
-      return localStorage.getItem("roka-builtin-avatar") || "instructor";
+      return localStorage.getItem("roka-builtin-avatar") || "executive";
     } catch {
-      return "instructor";
+      return "executive";
     }
   });
   const roomRef = useRef<Room | null>(null);
+  const twilioDeviceRef = useRef<TwilioDevice | null>(null);
+  const twilioCallRef = useRef<any>(null);
   const openAiPeerRef = useRef<RTCPeerConnection | null>(null);
   const openAiDataChannelRef = useRef<RTCDataChannel | null>(null);
   const openAiAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -420,6 +545,13 @@ export function App() {
   }, [settings]);
 
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+      setFirebaseUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
     try { localStorage.setItem("roka-builtin-avatar", selectedBuiltInAvatar); } catch { /* noop */ }
   }, [selectedBuiltInAvatar]);
 
@@ -438,6 +570,14 @@ export function App() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    void loadInbox();
+    const timer = window.setInterval(() => {
+      void loadInbox();
+    }, 8000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const refreshBackend = async () => {
@@ -481,7 +621,7 @@ export function App() {
     }));
     setAvatarUrlDraft(cleanUrl);
     setAvatarCreatorOpen(false);
-    setSection("session");
+    setSection("calls");
   };
 
   const uploadAvatarModel = async (file: File) => {
@@ -500,6 +640,278 @@ export function App() {
       return;
     }
     saveReadyPlayerAvatar(data.url);
+  };
+
+  const connectFirebaseSession = async (user: User) => {
+    const token = await user.getIdToken();
+    await fetch("/api/auth/firebase/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+  };
+
+  const signInGoogle = async () => {
+    try {
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      if (result.user) {
+        await connectFirebaseSession(result.user);
+        setNotice("Sesión Google conectada con CRM.");
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo iniciar sesión.");
+    }
+  };
+
+  const signOutGoogle = async () => {
+    try {
+      await signOut(firebaseAuth);
+      await fetch("/api/auth/firebase/session", { method: "DELETE" });
+      setNotice("Sesión Google cerrada.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo cerrar sesión.");
+    }
+  };
+
+  const connectTwilioDevice = async () => {
+    if (twilioDeviceRef.current) {
+      setCallStatus("ready");
+      return;
+    }
+    setNotice("");
+    try {
+      await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      });
+      const tokenRes = await fetch("/api/telephony/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identity: `${settings.company}-agente-web` }),
+      });
+      const tokenData = await readJsonResponse(tokenRes);
+      if (!tokenRes.ok || !tokenData.token) throw new Error(tokenData.error || "No se pudo crear token Twilio.");
+      const device = new TwilioDevice(tokenData.token, { logLevel: 1 });
+      device.on("registered", () => setCallStatus("ready"));
+      device.on("incoming", async (call) => {
+        twilioCallRef.current = call;
+        setCallStatus("ringing");
+        const from = String(call.parameters?.From || "");
+        setDialNumber(from);
+        try {
+          const customerRes = await fetch("/api/crm/search-customer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone: from }),
+          });
+          const customerData = await readJsonResponse(customerRes);
+          if (customerRes.ok) setSelectedCustomer(customerData.results?.[0] || null);
+        } catch { /* noop */ }
+        await call.accept();
+        setCallStatus("in-call");
+      });
+      device.on("error", (error) => {
+        setCallStatus("error");
+        setNotice(error.message || "Error de dispositivo Twilio.");
+      });
+      device.on("destroyed", () => setCallStatus("idle"));
+      await device.register();
+      twilioDeviceRef.current = device;
+    } catch (error) {
+      setCallStatus("error");
+      setNotice(error instanceof Error ? error.message : "No se pudo conectar Twilio.");
+    }
+  };
+
+  const startOutboundCall = async () => {
+    if (!dialNumber.trim()) return;
+    try {
+      if (!twilioDeviceRef.current) await connectTwilioDevice();
+      setCallStatus("ringing");
+      const response = await fetch("/api/telephony/call/outbound", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: dialNumber,
+          customerName: selectedCustomer?.name || "",
+        }),
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "No se pudo iniciar llamada.");
+      setCurrentCallSid(data.callSid || "");
+      setCallStatus("in-call");
+    } catch (error) {
+      setCallStatus("error");
+      setNotice(error instanceof Error ? error.message : "Fallo en llamada saliente.");
+    }
+  };
+
+  const hangupCall = async () => {
+    try {
+      if (twilioCallRef.current) {
+        twilioCallRef.current.disconnect();
+        twilioCallRef.current = null;
+      }
+      if (currentCallSid) {
+        await fetch("/api/telephony/call/hangup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callSid: currentCallSid }),
+        });
+      }
+      setCallStatus("ended");
+    } catch {
+      setCallStatus("error");
+    }
+  };
+
+  const searchCustomerByPhone = async () => {
+    try {
+      const res = await fetch("/api/crm/search-customer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: dialNumber }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "No se pudo buscar cliente.");
+      setSelectedCustomer(data.results?.[0] || null);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Error buscando cliente.");
+    }
+  };
+
+  const generateScript = async () => {
+    try {
+      const res = await fetch("/api/script/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer: selectedCustomer || { phone: dialNumber },
+          contextRows: selectedCustomer ? [selectedCustomer] : [],
+          objective: "Conectar, descubrir necesidad y proponer siguiente paso con cita o seguimiento.",
+        }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "No se pudo generar el guion.");
+      setScriptDraft({
+        opening: data.script?.opening || "",
+        discovery: data.script?.discovery || "",
+        objectionHandling: data.script?.objectionHandling || "",
+        closing: data.script?.closing || "",
+        nextSteps: data.script?.nextSteps || "",
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Error generando guion.");
+    }
+  };
+
+  const sendWhatsApp = async () => {
+    try {
+      const res = await fetch("/api/messages/whatsapp/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: waTo,
+          text: waText,
+          entityType: "contact",
+          entityId: selectedCustomer?.id || waTo,
+        }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "No se pudo enviar WhatsApp.");
+      setNotice("WhatsApp enviado y registrado en CRM.");
+      setWaText("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Error enviando WhatsApp.");
+    }
+  };
+
+  const sendTelegram = async () => {
+    try {
+      const res = await fetch("/api/messages/telegram/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chatId: tgChatId,
+          text: tgText,
+          entityType: "contact",
+          entityId: selectedCustomer?.id || tgChatId,
+        }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "No se pudo enviar Telegram.");
+      setNotice("Telegram enviado y registrado en CRM.");
+      setTgText("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Error enviando Telegram.");
+    }
+  };
+
+  const loadInbox = async () => {
+    try {
+      const res = await fetch("/api/inbox/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "No se pudo cargar bandeja.");
+      const items = Array.isArray(data.items) ? data.items : [];
+      setInboxItems(items);
+      if (!selectedConversationId && items[0]?.id) setSelectedConversationId(items[0].id);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Error cargando bandeja.");
+    }
+  };
+
+  const assignConversation = async (conversationId: string, assignedTo: string) => {
+    const res = await fetch("/api/inbox/assign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId, assignedTo }),
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok) throw new Error(data.error || "No se pudo asignar conversacion.");
+    await loadInbox();
+  };
+
+  const sendConversationReply = async (conversationId: string) => {
+    const row = inboxItems.find((item) => item.id === conversationId);
+    if (!row || !conversationReply.trim()) return;
+    const res = await fetch(`/api/inbox/${conversationId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: conversationReply,
+        channel: row.lastChannel,
+        direction: "outbound",
+      }),
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok) throw new Error(data.error || "No se pudo enviar mensaje.");
+    setConversationReply("");
+    await loadInbox();
+  };
+
+  const wrapUpConversation = async (conversationId: string) => {
+    const res = await fetch(`/api/inbox/${conversationId}/wrapup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: wrapOutcome,
+        reason: wrapReason,
+        notes: wrapNotes,
+        followUpAt: wrapFollowUpAt || null,
+      }),
+    });
+    const data = await readJsonResponse(res);
+    if (!res.ok) throw new Error(data.error || "No se pudo cerrar conversacion.");
+    setWrapOutcome("");
+    setWrapReason("");
+    setWrapNotes("");
+    setWrapFollowUpAt("");
+    await loadInbox();
   };
 
   const getDidAvatarSource = () => settings.providers.did.agent || settings.providers.did.avatar || didDefaultAvatar;
@@ -737,7 +1149,7 @@ export function App() {
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "input_text", text: "Saluda brevemente y di que estas listo para capacitar." }],
+              content: [{ type: "input_text", text: "Saluda brevemente y confirma que estas listo para atender la llamada." }],
             },
           }),
         );
@@ -968,15 +1380,20 @@ export function App() {
           <div className="brand-icon">R</div>
           <div>
             <strong>ROKA</strong>
-            <span>AI Training Center</span>
+            <span>Telemarketing Center</span>
           </div>
         </div>
         <nav>
           {[
+            ["conversations", MessageSquare, "Conversaciones"],
+            ["calls", Phone, "Llamadas"],
+            ["powerDialer", Radio, "Power Dialer"],
+            ["contacts", BookOpen, "Contactos"],
+            ["messages", MessageSquare, "Mensajeria"],
+            ["scripts", MonitorPlay, "Guiones IA"],
+            ["evaluations", Activity, "Evaluaciones"],
+            ["providers", PlugZap, "Canales"],
             ["settings", Settings, "Configuracion"],
-            ["session", MonitorPlay, "Sesion"],
-            ["knowledge", BookOpen, "Conocimiento"],
-            ["providers", PlugZap, "Proveedores"],
           ].map(([id, Icon, label]) => (
             <button className={section === id ? "rail-link active" : "rail-link"} key={id as string} onClick={() => setSection(id as Section)} type="button">
               <Icon size={18} />
@@ -996,17 +1413,21 @@ export function App() {
       <section className="main-area">
         <header className="app-header">
           <div>
-            <p>Centro de capacitacion IA</p>
+            <p>Centro omnicanal</p>
             <h1>{settings.company}</h1>
           </div>
           <div className="header-actions">
+            <button className="secondary-action" onClick={firebaseUser ? signOutGoogle : signInGoogle} type="button">
+              <Building2 size={18} />
+              {firebaseUser ? "Salir Google" : "Entrar con Google"}
+            </button>
             <button className="secondary-action" onClick={refreshBackend} type="button">
               <ServerCog size={18} />
               Backend
             </button>
-            <button className="primary-action" onClick={() => setSection("settings")} type="button">
+            <button className="primary-action" onClick={() => setSection("providers")} type="button">
               <KeyRound size={18} />
-              Llaves y modelos
+              Configurar canales
             </button>
           </div>
         </header>
@@ -1023,7 +1444,29 @@ export function App() {
           />
         )}
 
-        {section === "session" && (
+        {section === "conversations" && (
+          <ConversationsView
+            items={inboxItems}
+            selectedConversationId={selectedConversationId}
+            setSelectedConversationId={setSelectedConversationId}
+            reply={conversationReply}
+            setReply={setConversationReply}
+            wrapOutcome={wrapOutcome}
+            wrapReason={wrapReason}
+            wrapNotes={wrapNotes}
+            wrapFollowUpAt={wrapFollowUpAt}
+            setWrapOutcome={setWrapOutcome}
+            setWrapReason={setWrapReason}
+            setWrapNotes={setWrapNotes}
+            setWrapFollowUpAt={setWrapFollowUpAt}
+            onAssign={assignConversation}
+            onReply={sendConversationReply}
+            onWrapUp={wrapUpConversation}
+            onRefresh={loadInbox}
+          />
+        )}
+
+        {section === "calls" && (
           <SessionView
             activeProvider={activeProvider}
             input={input}
@@ -1043,6 +1486,17 @@ export function App() {
             onConnectLiveKit={connectLiveKit}
             onConnectOpenAiRealtime={connectOpenAiRealtime}
             onSend={sendMessage}
+            callStatus={callStatus}
+            dialNumber={dialNumber}
+            selectedCustomer={selectedCustomer}
+            scriptDraft={scriptDraft}
+            setDialNumber={setDialNumber}
+            setScriptDraft={setScriptDraft}
+            onConnectTwilio={connectTwilioDevice}
+            onDial={startOutboundCall}
+            onHangup={hangupCall}
+            onSearchCustomer={searchCustomerByPhone}
+            onGenerateScript={generateScript}
             didStatus={didStatus}
             didVideoRef={didVideoRef}
             didPoster={getDidAvatarSource()}
@@ -1051,7 +1505,7 @@ export function App() {
           />
         )}
 
-        {section === "knowledge" && (
+        {section === "contacts" && (
           <KnowledgeView
             items={knowledge}
             settings={settings}
@@ -1061,6 +1515,40 @@ export function App() {
             onUpload={uploadKnowledge}
             strict={settings.strictKnowledge}
           />
+        )}
+
+        {section === "messages" && (
+          <MessagingView
+            waTo={waTo}
+            waText={waText}
+            tgChatId={tgChatId}
+            tgText={tgText}
+            setWaTo={setWaTo}
+            setWaText={setWaText}
+            setTgChatId={setTgChatId}
+            setTgText={setTgText}
+            onSendWhatsApp={sendWhatsApp}
+            onSendTelegram={sendTelegram}
+          />
+        )}
+
+        {section === "scripts" && (
+          <ScriptsView scriptDraft={scriptDraft} setScriptDraft={setScriptDraft} onGenerate={generateScript} />
+        )}
+
+        {section === "powerDialer" && (
+          <PowerDialerView
+            dialNumber={dialNumber}
+            setDialNumber={setDialNumber}
+            onSearchCustomer={searchCustomerByPhone}
+            onDial={startOutboundCall}
+            onHangup={hangupCall}
+            callStatus={callStatus}
+          />
+        )}
+
+        {section === "evaluations" && (
+          <EvaluationsView items={inboxItems} />
         )}
 
         {section === "providers" && (
@@ -1149,6 +1637,7 @@ function SettingsView({
           <h3>Infraestructura realtime</h3>
           <ProviderCredentials id="livekit" settings={settings} updateProvider={updateProvider} />
           <ProviderCredentials id="pipecat" settings={settings} updateProvider={updateProvider} />
+          <ProviderCredentials id="twilio" settings={settings} updateProvider={updateProvider} />
         </div>
 
         <div className="config-section">
@@ -1215,6 +1704,74 @@ function ProviderCredentials({
             <input value={config.url || ""} placeholder={id === "livekit" ? "wss://xxx.livekit.cloud" : "http://localhost:7860"} onChange={(event) => updateProvider(id, { url: event.target.value })} />
           </label>
         )}
+        {id === "twilio" && (
+          <>
+            <label>
+              Account SID
+              <input value={config.accountSid || ""} onChange={(event) => updateProvider(id, { accountSid: event.target.value })} />
+            </label>
+            <label>
+              API Key SID
+              <input value={config.apiKeySid || ""} onChange={(event) => updateProvider(id, { apiKeySid: event.target.value })} />
+            </label>
+            <label>
+              API Key Secret
+              <input type="password" value={config.apiKeySecret || ""} onChange={(event) => updateProvider(id, { apiKeySecret: event.target.value })} />
+            </label>
+            <label>
+              TwiML App SID
+              <input value={config.twimlAppSid || ""} onChange={(event) => updateProvider(id, { twimlAppSid: event.target.value })} />
+            </label>
+            <label>
+              Número Twilio
+              <input value={config.phoneNumber || ""} placeholder="+52..." onChange={(event) => updateProvider(id, { phoneNumber: event.target.value })} />
+            </label>
+            <label>
+              Webhook token
+              <input type="password" value={config.webhookAuthToken || ""} onChange={(event) => updateProvider(id, { webhookAuthToken: event.target.value })} />
+            </label>
+            <label>
+              CRM Bridge URL
+              <input value={config.crmBridgeUrl || ""} onChange={(event) => updateProvider(id, { crmBridgeUrl: event.target.value })} />
+            </label>
+            <label>
+              CRM Bridge token
+              <input type="password" value={config.bridgeToken || ""} onChange={(event) => updateProvider(id, { bridgeToken: event.target.value })} />
+            </label>
+            <label>
+              CRM Organization ID
+              <input value={config.organizationId || ""} onChange={(event) => updateProvider(id, { organizationId: event.target.value })} />
+            </label>
+            <label>
+              Allowed origins CSV
+              <input value={config.allowedOrigins || ""} onChange={(event) => updateProvider(id, { allowedOrigins: event.target.value })} />
+            </label>
+          </>
+        )}
+        {id === "whatsapp" && (
+          <>
+            <label>
+              Provider
+              <input value={config.provider || "twilio"} onChange={(event) => updateProvider(id, { provider: event.target.value })} />
+            </label>
+            <label>
+              From
+              <input value={config.from || ""} placeholder="whatsapp:+14155238886" onChange={(event) => updateProvider(id, { from: event.target.value })} />
+            </label>
+          </>
+        )}
+        {id === "telegram" && (
+          <>
+            <label>
+              Bot token
+              <input type="password" value={config.botToken || ""} onChange={(event) => updateProvider(id, { botToken: event.target.value })} />
+            </label>
+            <label>
+              Default chat id
+              <input value={config.defaultChatId || ""} onChange={(event) => updateProvider(id, { defaultChatId: event.target.value })} />
+            </label>
+          </>
+        )}
         <label>
           Modelo
           <input value={config.model} placeholder={provider.defaultModel} onChange={(event) => updateProvider(id, { model: event.target.value })} />
@@ -1279,6 +1836,17 @@ function SessionView({
   onConnectLiveKit,
   onConnectOpenAiRealtime,
   onSend,
+  callStatus,
+  dialNumber,
+  selectedCustomer,
+  scriptDraft,
+  setDialNumber,
+  setScriptDraft,
+  onConnectTwilio,
+  onDial,
+  onHangup,
+  onSearchCustomer,
+  onGenerateScript,
   didStatus,
   didVideoRef,
   didPoster,
@@ -1303,6 +1871,17 @@ function SessionView({
   onConnectLiveKit: () => void;
   onConnectOpenAiRealtime: () => void;
   onSend: (event?: FormEvent) => void;
+  callStatus: CallStatus;
+  dialNumber: string;
+  selectedCustomer: Record<string, unknown> | null;
+  scriptDraft: ScriptDraft;
+  setDialNumber: (value: string) => void;
+  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
+  onConnectTwilio: () => void;
+  onDial: () => void;
+  onHangup: () => void;
+  onSearchCustomer: () => void;
+  onGenerateScript: () => void;
   didStatus: "disconnected" | "connecting" | "connected" | "error";
   didVideoRef: React.RefObject<HTMLVideoElement | null>;
   didPoster: string;
@@ -1324,7 +1903,7 @@ function SessionView({
         {/* ── Toolbar ── */}
         <div className="panel-title">
           <div>
-            <p>Sala de capacitación en vivo</p>
+            <p>Sala de llamadas en vivo</p>
             <h2>{activeProvider.name} · {settings.providers[settings.activeProvider].model}</h2>
           </div>
           <div className="header-actions">
@@ -1341,6 +1920,10 @@ function SessionView({
             <button className={openAiRealtimeStatus === "connected" ? "danger-action" : "secondary-action"} onClick={onConnectOpenAiRealtime} type="button">
               <Mic size={16} />
               {openAiRealtimeStatus === "connected" ? "Desconectar voz" : openAiRealtimeStatus === "connecting" ? "Conectando…" : "Voz IA"}
+            </button>
+            <button className={callStatus === "ready" || callStatus === "in-call" ? "danger-action" : "secondary-action"} onClick={onConnectTwilio} type="button">
+              <Phone size={16} />
+              {callStatus === "ready" || callStatus === "in-call" ? "Softphone activo" : "Conectar telefonía"}
             </button>
           </div>
         </div>
@@ -1379,7 +1962,7 @@ function SessionView({
           <div className="session-chat-panel">
             <div className="chat-header">
               <MessageSquare size={16} />
-              <h3>Chat de capacitación</h3>
+              <h3>Chat operativo</h3>
             </div>
             <div className="message-list">
               {messages.map((message) => (
@@ -1390,7 +1973,7 @@ function SessionView({
               ))}
             </div>
             <form className="composer" onSubmit={onSend}>
-              <input value={input} aria-label="Mensaje para el instructor" placeholder="Escribe tu pregunta…" onChange={(event) => setInput(event.target.value)} />
+              <input value={input} aria-label="Mensaje para el asistente comercial" placeholder="Escribe una instruccion o nota…" onChange={(event) => setInput(event.target.value)} />
               <button className="primary-action" type="submit">
                 <ChevronRight size={16} />
               </button>
@@ -1416,6 +1999,72 @@ function SessionView({
           </span>
         </div>
 
+        <div className="ops-grid">
+          <section className="ops-panel">
+            <div className="panel-title">
+              <div>
+                <p>Central</p>
+                <h2>Llamadas entrantes/salientes</h2>
+              </div>
+            </div>
+            <div className="form-grid compact">
+              <label>
+                Número cliente
+                <input value={dialNumber} placeholder="+52..." onChange={(event) => setDialNumber(event.target.value)} />
+              </label>
+            </div>
+            <div className="header-actions">
+              <button className="secondary-action" onClick={onSearchCustomer} type="button">Buscar cliente</button>
+              <button className="primary-action" onClick={onDial} type="button">Llamar</button>
+              <button className="danger-action" onClick={onHangup} type="button">Colgar</button>
+            </div>
+            <div className="runtime-strip" style={{ marginTop: 10 }}>
+              <span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado llamada: {callStatus}</span>
+            </div>
+          </section>
+          <section className="ops-panel">
+            <div className="panel-title">
+              <div>
+                <p>Cliente</p>
+                <h2>Contexto CRM</h2>
+              </div>
+            </div>
+            <p className="muted">
+              {selectedCustomer ? JSON.stringify(selectedCustomer) : "Sin cliente cargado."}
+            </p>
+          </section>
+        </div>
+
+        <section className="ops-panel">
+          <div className="panel-title">
+            <div>
+              <p>Guion IA</p>
+              <h2>Script dinámico por cliente</h2>
+            </div>
+            <div className="header-actions">
+              <button className="secondary-action" onClick={onGenerateScript} type="button">Generar</button>
+            </div>
+          </div>
+          <div className="assistant-editor">
+            <label>
+              Apertura
+              <textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((current) => ({ ...current, opening: event.target.value }))} />
+            </label>
+            <label>
+              Descubrimiento
+              <textarea value={scriptDraft.discovery} onChange={(event) => setScriptDraft((current) => ({ ...current, discovery: event.target.value }))} />
+            </label>
+            <label>
+              Objeciones
+              <textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((current) => ({ ...current, objectionHandling: event.target.value }))} />
+            </label>
+            <label>
+              Cierre y siguientes pasos
+              <textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((current) => ({ ...current, closing: event.target.value }))} />
+            </label>
+          </div>
+        </section>
+
         {settings.activeAvatarProvider === "did" && (
           <div className="did-debug-panel">
             <strong>Diagnostico D-ID</strong>
@@ -1432,7 +2081,7 @@ function SessionView({
         {/* ── Instructor Gallery (compact) ── */}
         <div className="gallery-section-title">
           <Bot size={14} />
-          Elige tu instructor
+          Elige tu agente visual
           <span className="gallery-divider" />
         </div>
         <div className="builtin-avatar-gallery">
@@ -1560,6 +2209,253 @@ function KnowledgeView({
         </div>
       </section>
     </div>
+  );
+}
+
+function ConversationsView({
+  items,
+  selectedConversationId,
+  setSelectedConversationId,
+  reply,
+  setReply,
+  wrapOutcome,
+  wrapReason,
+  wrapNotes,
+  wrapFollowUpAt,
+  setWrapOutcome,
+  setWrapReason,
+  setWrapNotes,
+  setWrapFollowUpAt,
+  onAssign,
+  onReply,
+  onWrapUp,
+  onRefresh,
+}: {
+  items: InboxConversation[];
+  selectedConversationId: string;
+  setSelectedConversationId: (value: string) => void;
+  reply: string;
+  setReply: (value: string) => void;
+  wrapOutcome: string;
+  wrapReason: string;
+  wrapNotes: string;
+  wrapFollowUpAt: string;
+  setWrapOutcome: (value: string) => void;
+  setWrapReason: (value: string) => void;
+  setWrapNotes: (value: string) => void;
+  setWrapFollowUpAt: (value: string) => void;
+  onAssign: (conversationId: string, assignedTo: string) => Promise<void>;
+  onReply: (conversationId: string) => Promise<void>;
+  onWrapUp: (conversationId: string) => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const selected = items.find((item) => item.id === selectedConversationId) || null;
+  return (
+    <div className="ops-grid">
+      <section className="ops-panel">
+        <div className="panel-title">
+          <div><p>Bandeja</p><h2>Conversaciones</h2></div>
+          <button className="secondary-action" onClick={() => void onRefresh()} type="button">Actualizar</button>
+        </div>
+        <div className="data-table">
+          {items.map((item) => (
+            <article key={item.id} onClick={() => setSelectedConversationId(item.id)} style={{ cursor: "pointer", border: selectedConversationId === item.id ? "1px solid var(--brand)" : undefined }}>
+              <MessageSquare size={16} />
+              <div>
+                <strong>{item.customerKey}</strong>
+                <span>{item.lastChannel} · {item.status}</span>
+              </div>
+              <span className="pill">{item.assignedTo || "unassigned"}</span>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title">
+          <div><p>Detalle</p><h2>{selected ? selected.customerKey : "Selecciona conversación"}</h2></div>
+          {selected && <button className="secondary-action" onClick={() => void onAssign(selected.id, "agente-activo")} type="button">Asignarme</button>}
+        </div>
+        <div className="message-list" style={{ minHeight: 260 }}>
+          {(selected?.events || []).map((event) => (
+            <article className={`msg ${event.direction === "outbound" ? "user" : "assistant"}`} key={event.id}>
+              <strong>{event.channel} · {event.direction}</strong>
+              <p>{event.text || event.status}</p>
+            </article>
+          ))}
+        </div>
+        {selected && (
+          <form className="composer" onSubmit={(event) => { event.preventDefault(); void onReply(selected.id); }}>
+            <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Responder..." />
+            <button className="primary-action" type="submit"><ChevronRight size={16} /></button>
+          </form>
+        )}
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title"><div><p>Wrap-up</p><h2>Cierre obligatorio</h2></div></div>
+        <div className="assistant-editor">
+          <label>Outcome<input value={wrapOutcome} onChange={(event) => setWrapOutcome(event.target.value)} /></label>
+          <label>Reason<input value={wrapReason} onChange={(event) => setWrapReason(event.target.value)} /></label>
+          <label>Notas<textarea value={wrapNotes} onChange={(event) => setWrapNotes(event.target.value)} /></label>
+          <label>Follow-up<input type="datetime-local" value={wrapFollowUpAt} onChange={(event) => setWrapFollowUpAt(event.target.value)} /></label>
+        </div>
+        <button disabled={!selected} className="primary-action" onClick={() => selected && void onWrapUp(selected.id)} type="button">Cerrar interacción</button>
+      </section>
+    </div>
+  );
+}
+
+function PowerDialerView({
+  dialNumber,
+  setDialNumber,
+  onSearchCustomer,
+  onDial,
+  onHangup,
+  callStatus,
+}: {
+  dialNumber: string;
+  setDialNumber: (value: string) => void;
+  onSearchCustomer: () => Promise<void>;
+  onDial: () => Promise<void>;
+  onHangup: () => Promise<void>;
+  callStatus: CallStatus;
+}) {
+  return (
+    <section className="ops-panel">
+      <div className="panel-title"><div><p>Marcación</p><h2>Power Dialer</h2></div></div>
+      <div className="form-grid compact">
+        <label>Número<input value={dialNumber} onChange={(event) => setDialNumber(event.target.value)} /></label>
+      </div>
+      <div className="header-actions">
+        <button className="secondary-action" onClick={() => void onSearchCustomer()} type="button">Buscar</button>
+        <button className="primary-action" onClick={() => void onDial()} type="button">Llamar</button>
+        <button className="danger-action" onClick={() => void onHangup()} type="button">Colgar</button>
+      </div>
+      <div className="runtime-strip"><span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado: {callStatus}</span></div>
+    </section>
+  );
+}
+
+function EvaluationsView({ items }: { items: InboxConversation[] }) {
+  const total = items.length;
+  const closed = items.filter((item) => item.status === "closed").length;
+  const pendingWrap = items.filter((item) => item.status === "wrap_up_required").length;
+  return (
+    <div className="ops-grid">
+      <section className="ops-panel"><h2>Total interacciones</h2><div className="rag-stats"><strong>{total}</strong><span>omnicanal</span></div></section>
+      <section className="ops-panel"><h2>Cerradas</h2><div className="rag-stats"><strong>{closed}</strong><span>con wrap-up</span></div></section>
+      <section className="ops-panel"><h2>Pendientes wrap-up</h2><div className="rag-stats"><strong>{pendingWrap}</strong><span>requieren cierre</span></div></section>
+    </div>
+  );
+}
+
+function MessagingView({
+  waTo,
+  waText,
+  tgChatId,
+  tgText,
+  setWaTo,
+  setWaText,
+  setTgChatId,
+  setTgText,
+  onSendWhatsApp,
+  onSendTelegram,
+}: {
+  waTo: string;
+  waText: string;
+  tgChatId: string;
+  tgText: string;
+  setWaTo: (value: string) => void;
+  setWaText: (value: string) => void;
+  setTgChatId: (value: string) => void;
+  setTgText: (value: string) => void;
+  onSendWhatsApp: () => void;
+  onSendTelegram: () => void;
+}) {
+  return (
+    <div className="ops-grid">
+      <section className="ops-panel">
+        <div className="panel-title">
+          <div>
+            <p>Canal</p>
+            <h2>WhatsApp</h2>
+          </div>
+          <button className="primary-action" onClick={onSendWhatsApp} type="button">Enviar</button>
+        </div>
+        <div className="assistant-editor">
+          <label>
+            Numero destino
+            <input value={waTo} placeholder="+52..." onChange={(event) => setWaTo(event.target.value)} />
+          </label>
+          <label>
+            Mensaje
+            <textarea value={waText} onChange={(event) => setWaText(event.target.value)} />
+          </label>
+        </div>
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title">
+          <div>
+            <p>Canal</p>
+            <h2>Telegram</h2>
+          </div>
+          <button className="primary-action" onClick={onSendTelegram} type="button">Enviar</button>
+        </div>
+        <div className="assistant-editor">
+          <label>
+            Chat ID
+            <input value={tgChatId} onChange={(event) => setTgChatId(event.target.value)} />
+          </label>
+          <label>
+            Mensaje
+            <textarea value={tgText} onChange={(event) => setTgText(event.target.value)} />
+          </label>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ScriptsView({
+  scriptDraft,
+  setScriptDraft,
+  onGenerate,
+}: {
+  scriptDraft: ScriptDraft;
+  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
+  onGenerate: () => void;
+}) {
+  return (
+    <section className="ops-panel">
+      <div className="panel-title">
+        <div>
+          <p>IA comercial</p>
+          <h2>Guiones dinamicos por cliente</h2>
+        </div>
+        <button className="primary-action" onClick={onGenerate} type="button">Generar guion</button>
+      </div>
+      <div className="assistant-editor">
+        <label>
+          Apertura
+          <textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((current) => ({ ...current, opening: event.target.value }))} />
+        </label>
+        <label>
+          Descubrimiento
+          <textarea value={scriptDraft.discovery} onChange={(event) => setScriptDraft((current) => ({ ...current, discovery: event.target.value }))} />
+        </label>
+        <label>
+          Objeciones
+          <textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((current) => ({ ...current, objectionHandling: event.target.value }))} />
+        </label>
+        <label>
+          Cierre
+          <textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((current) => ({ ...current, closing: event.target.value }))} />
+        </label>
+        <label>
+          Proximos pasos
+          <textarea value={scriptDraft.nextSteps} onChange={(event) => setScriptDraft((current) => ({ ...current, nextSteps: event.target.value }))} />
+        </label>
+      </div>
+    </section>
   );
 }
 
