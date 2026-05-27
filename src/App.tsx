@@ -1,10 +1,10 @@
-import { Building2, MessageSquare, Phone, Radio, Save, Send, Settings, Sparkles, UserCircle2 } from "lucide-react";
+import { Building2, MessageSquare, Phone, Radio, Save, Send, Settings, Sparkles, UserCircle2, Smartphone, Search, HelpCircle, CheckCircle, RefreshCw, Archive } from "lucide-react";
 import { Device as TwilioDevice } from "@twilio/voice-sdk";
 import { onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, getRedirectResult, User } from "firebase/auth";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { firebaseAuth, googleProvider } from "./firebase";
 
-type Section = "conversations" | "calls" | "powerDialer" | "contacts" | "messages" | "scripts" | "evaluations" | "providers" | "settings";
+type Section = "conversations" | "calls" | "contacts" | "messages" | "scripts" | "evaluations" | "providers" | "settings";
 type ProviderId = "twilio" | "whatsapp" | "telegram";
 type CallStatus = "idle" | "ready" | "ringing" | "in-call" | "ended" | "error";
 type CrmContact = { id: string; name?: string; email?: string; phone?: string; account?: string; company?: string; collection?: string };
@@ -91,6 +91,7 @@ export default function App() {
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [powerDialerQueue, setPowerDialerQueue] = useState<CrmContact[]>([]);
   const [powerDialerIndex, setPowerDialerIndex] = useState(0);
+  const [callMethod, setCallMethod] = useState<"twilio" | "personal">("twilio");
   const twilioDeviceRef = useRef<TwilioDevice | null>(null);
   const twilioCallSidRef = useRef("");
 
@@ -113,7 +114,9 @@ export default function App() {
   useEffect(() => {
     void boot();
     const unsub = onAuthStateChanged(firebaseAuth, (user) => setAuthUser(user));
-    void getRedirectResult(firebaseAuth).catch(() => undefined);
+    getRedirectResult(firebaseAuth).then((result) => {
+      if (result?.user) void connectFirebaseSession(result.user);
+    }).catch(() => undefined);
     return () => unsub();
   }, []);
 
@@ -330,7 +333,7 @@ export default function App() {
       return;
     }
     const safe = encodeURIComponent(to);
-    window.open(`https://dialer.skype.com/?number=${safe}`, "_blank", "noopener,noreferrer");
+    window.open(`tel:${safe}`, "_self");
     await fetch("/api/telephony/personal-line/attempt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -432,8 +435,7 @@ export default function App() {
         <nav>
           {([
             ["conversations", MessageSquare, "Conversaciones"],
-            ["calls", Phone, "Llamadas"],
-            ["powerDialer", Radio, "Power Dialer"],
+            ["calls", Phone, "Telefonía"],
             ["contacts", UserCircle2, "Contactos"],
             ["messages", Send, "Mensajería"],
             ["scripts", Sparkles, "Guiones IA"],
@@ -479,65 +481,305 @@ export default function App() {
         {section === "calls" && (
           <div className="ops-grid">
             <section className="ops-panel">
-              <div className="panel-title"><div><p>Telefonía</p><h2>Llamadas</h2></div></div>
-              <div className="form-grid compact">
-                <label>Buscar cliente (nombre, empresa, email o teléfono)<input value={customerSearchQuery} onChange={(e) => setCustomerSearchQuery(e.target.value)} placeholder="Buscar..." /></label>
-                <label>Número para llamar<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label>
+              <div className="panel-title">
+                <div>
+                  <p>Telefonía Integrada</p>
+                  <h2>Llamadas & Dialer</h2>
+                </div>
+                <button 
+                  className="secondary-action" 
+                  onClick={() => void runAction("dialer-queue", loadDialerQueue)} 
+                  disabled={pending["dialer-queue"]}
+                >
+                  {pending["dialer-queue"] ? "Cargando..." : "Cargar cola CRM"}
+                </button>
               </div>
-              <div className="header-actions">
-                <button className="secondary-action" onClick={() => void runAction("twilio-connect", connectTwilioDevice)} disabled={pending["twilio-connect"]}>{pending["twilio-connect"] ? "Conectando..." : "Conectar"}</button>
-                <button className="secondary-action" onClick={() => void runAction("customer-search-calls", searchCustomer)} disabled={pending["customer-search-calls"]}>{pending["customer-search-calls"] ? "Buscando..." : "Buscar cliente"}</button>
-                <button className="primary-action" onClick={() => void runAction("call-outbound", startOutboundCall)} disabled={pending["call-outbound"]}>{pending["call-outbound"] ? "Llamando..." : "Llamar"}</button>
-                <button className="secondary-action" onClick={() => void runAction("call-personal", startPersonalPhoneLinkCall)} disabled={pending["call-personal"]}>{pending["call-personal"] ? "Abriendo..." : "Llamar con mi número"}</button>
-                <button className="danger-action" onClick={() => void runAction("call-hangup", hangupCall)} disabled={pending["call-hangup"]}>{pending["call-hangup"] ? "Colgando..." : "Colgar"}</button>
+
+              {/* Dialer Mode Selector */}
+              <div className="dialer-mode-selector">
+                <div 
+                  className={`dialer-mode-card ${callMethod === "twilio" ? "active" : ""}`}
+                  onClick={() => setCallMethod("twilio")}
+                >
+                  <Building2 size={24} />
+                  <strong>Línea Corporativa</strong>
+                  <span>Llamada vía Twilio (Cloud)</span>
+                </div>
+                <div 
+                  className={`dialer-mode-card ${callMethod === "personal" ? "active" : ""}`}
+                  onClick={() => setCallMethod("personal")}
+                >
+                  <Smartphone size={24} />
+                  <strong>Línea Personal</strong>
+                  <span>Enlace Móvil (Windows)</span>
+                </div>
               </div>
-              <p className="muted">Estado: {callStatus}</p>
+
+              <div className="unified-call-container">
+                <div className="form-grid compact">
+                  <div className="dialer-input-wrapper">
+                    <label>Buscar cliente (CRM)</label>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <input 
+                        value={customerSearchQuery} 
+                        onChange={(e) => setCustomerSearchQuery(e.target.value)} 
+                        placeholder="Nombre, email o tel..." 
+                        style={{ flex: 1 }}
+                      />
+                      <button 
+                        className="secondary-action" 
+                        onClick={() => void runAction("customer-search-calls", searchCustomer)} 
+                        disabled={pending["customer-search-calls"]}
+                        style={{ minHeight: "38px" }}
+                      >
+                        <Search size={16} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="dialer-input-wrapper">
+                    <label>Número de Destino</label>
+                    <div className="unified-phone-input-group">
+                      <Phone className="prefix-icon" size={18} />
+                      <input 
+                        value={dialNumber} 
+                        onChange={(e) => setDialNumber(e.target.value)} 
+                        placeholder="+52..." 
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {callMethod === "twilio" ? (
+                  <div className="info-alert-box info">
+                    <CheckCircle size={16} />
+                    <div>
+                      <strong>Twilio Voice Channel</strong>
+                      <p>Llamadas salientes directas desde el navegador. Requiere conexión al servicio corporativo de Twilio.</p>
+                      <button 
+                        className="secondary-action" 
+                        onClick={() => void runAction("twilio-connect", connectTwilioDevice)} 
+                        disabled={pending["twilio-connect"]}
+                        style={{ marginTop: "10px", fontSize: "0.75rem", padding: "4px 10px", minHeight: "28px" }}
+                      >
+                        {pending["twilio-connect"] ? "Conectando..." : "Conectar Twilio"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="info-alert-box warn">
+                    <Smartphone size={16} />
+                    <div>
+                      <strong>Enlace Móvil Windows (Línea Personal)</strong>
+                      <p>Esta opción abrirá el marcador nativo de tu sistema usando la conexión de tu teléfono (Microsoft Phone Link). Las llamadas se registrarán automáticamente en el CRM.</p>
+                    </div>
+                  </div>
+                )}
+
+                {activeDialerContact && (
+                  <div className="info-alert-box info" style={{ borderLeft: "4px solid var(--brand)", background: "rgba(255,255,255,0.01)", marginTop: "12px" }}>
+                    <div>
+                      <strong>Contacto en Marcación Automática</strong>
+                      <p style={{ fontSize: "0.9rem", color: "var(--text-2)", fontWeight: "600", marginTop: "4px" }}>
+                        {activeDialerContact?.name || "N/D"}
+                      </p>
+                      <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                        Empresa: {activeDialerContact?.company || activeDialerContact?.account || "No especificada"} · Cola: {powerDialerIndex + 1}/{Math.max(powerDialerQueue.length, 1)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "4px 0" }}>
+                  <div className="dialer-status-badge idle">
+                    Estado: <strong style={{ marginLeft: "4px", color: callStatus === "in-call" ? "var(--brand)" : "inherit" }}>{callStatus.toUpperCase()}</strong>
+                  </div>
+                  <span className={`call-provider-badge ${callMethod === "twilio" ? "twilio" : "personal"}`}>
+                    Canal: {callMethod === "twilio" ? "Twilio" : "Celular"}
+                  </span>
+                </div>
+
+                <div className="control-flow-actions">
+                  {callMethod === "twilio" ? (
+                    <div className="control-flow-actions-row">
+                      <button 
+                        className="dialer-btn dial" 
+                        onClick={() => void runAction("call-outbound", startOutboundCall)} 
+                        disabled={pending["call-outbound"] || callStatus === "in-call"}
+                      >
+                        <Phone size={16} />
+                        {pending["call-outbound"] ? "Llamando..." : "Llamar Twilio"}
+                      </button>
+                      <button 
+                        className="dialer-btn hangup" 
+                        onClick={() => void runAction("call-hangup", hangupCall)} 
+                        disabled={pending["call-hangup"] || callStatus !== "in-call"}
+                      >
+                        <Phone size={16} style={{ transform: "rotate(135deg)" }} />
+                        {pending["call-hangup"] ? "Colgando..." : "Colgar"}
+                      </button>
+                    </div>
+                  ) : (
+                    <button 
+                      className="dialer-btn dial" 
+                      onClick={() => void runAction("call-personal", startPersonalPhoneLinkCall)} 
+                      disabled={pending["call-personal"]}
+                    >
+                      <Smartphone size={16} />
+                      {pending["call-personal"] ? "Abriendo Marcador..." : "Llamar con Mi Número Celular"}
+                    </button>
+                  )}
+                  {powerDialerQueue.length > 0 && (
+                    <button 
+                      className="dialer-btn secondary" 
+                      onClick={() => dialerNext()} 
+                      style={{ width: "100%", marginTop: "8px" }}
+                    >
+                      Siguiente Contacto
+                    </button>
+                  )}
+                </div>
+              </div>
             </section>
+
             <section className="ops-panel">
               <div className="panel-title"><div><p>Cliente</p><h2>Contexto CRM</h2></div></div>
-              <pre className="muted">{selectedCustomer ? JSON.stringify(selectedCustomer, null, 2) : "Sin cliente seleccionado."}</pre>
+              <pre className="muted" style={{ maxHeight: "380px", overflow: "auto" }}>
+                {selectedCustomer ? JSON.stringify(selectedCustomer, null, 2) : "Sin cliente seleccionado."}
+              </pre>
             </section>
           </div>
         )}
 
         {section === "messages" && (
-          <div className="ops-grid" style={{ gridTemplateColumns: "320px minmax(0,1fr) 360px" }}>
-            <section className="ops-panel">
-              <div className="panel-title"><div><p>Bandeja</p><h2>Chats por agente</h2></div><button className="secondary-action" onClick={() => void loadInbox()}>Actualizar</button></div>
-              <div className="form-grid"><label>Filtro agente asignado<input value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} placeholder="roka-agent-1" /></label></div>
-              <div className="data-table">
+          <div className="premium-messages-grid" style={{ gridTemplateColumns: "320px minmax(0,1fr) 320px" }}>
+            <div className="chat-list-panel">
+              <div className="chat-list-header">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Bandeja de Entrada</h2>
+                  <button className="secondary-action" onClick={() => void loadInbox()} style={{ padding: "4px 8px", fontSize: "0.8rem", minHeight: "28px" }}>
+                    <RefreshCw size={14} style={{ marginRight: 4 }}/> Actualizar
+                  </button>
+                </div>
+                <input 
+                  value={agentFilter} 
+                  onChange={(e) => setAgentFilter(e.target.value)} 
+                  placeholder="Filtrar agente (ej: roka-agent-1)" 
+                  style={{ width: "100%", background: "rgba(0,0,0,0.2)", border: "1px solid var(--line)", padding: "8px 12px", borderRadius: "8px", color: "var(--text-2)", fontSize: "0.85rem" }} 
+                />
+              </div>
+              <div className="chat-list-items">
                 {filteredInboxItems.map((item) => (
-                  <article key={`msg-${item.id}`} onClick={() => setSelectedConvId(item.id)} style={{ cursor: "pointer", border: selectedConvId === item.id ? "1px solid var(--brand)" : undefined }}>
-                    <MessageSquare size={16} />
-                    <div>
-                      <strong>{item.customerKey}</strong>
-                      <span>{item.lastChannel} · {item.status} · {item.assignedTo || "sin asignar"}</span>
+                  <div 
+                    key={`msg-${item.id}`} 
+                    className={`chat-item ${selectedConvId === item.id ? "active" : ""}`} 
+                    onClick={() => setSelectedConvId(item.id)}
+                  >
+                    <div className="chat-item-icon">
+                      <MessageSquare size={18} />
                     </div>
-                  </article>
+                    <div className="chat-item-details">
+                      <strong>{item.customerKey}</strong>
+                      <span>{item.lastChannel} · {item.status}</span>
+                    </div>
+                  </div>
+                ))}
+                {filteredInboxItems.length === 0 && <p style={{ textAlign: "center", color: "var(--muted)", marginTop: "20px", fontSize: "0.9rem" }}>No hay conversaciones.</p>}
+              </div>
+            </div>
+
+            <div className="chat-thread-panel">
+              <div className="chat-thread-header">
+                <div>
+                  <h2 style={{ margin: 0, fontSize: "1.2rem" }}>{selectedConversation?.customerKey || "Selecciona una conversación"}</h2>
+                  {selectedConversation && (
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "4px", display: "block" }}>
+                      Asignado a: {selectedConversation.assignedTo || "Nadie"} · Estado: {selectedConversation.status}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button className="secondary-action" onClick={() => { setSelectedConvId("") }} disabled={!selectedConversation} title="Cerrar chat">
+                    <Archive size={16} />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="chat-thread-messages">
+                {!selectedConversation && (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)" }}>
+                    <p>Selecciona una conversación a la izquierda para empezar.</p>
+                  </div>
+                )}
+                {(selectedConversation?.events || []).map((m) => (
+                  <div key={`msg-thread-${m.id}`} className={`chat-bubble ${m.direction === "outbound" ? "outbound" : "inbound"}`}>
+                    <p style={{ margin: 0 }}>{m.text}</p>
+                    <span className="chat-bubble-meta">{m.channel} · {m.direction}</span>
+                  </div>
                 ))}
               </div>
-            </section>
-            <section className="ops-panel">
-              <div className="panel-title"><div><p>Chat</p><h2>{selectedConversation?.customerKey || "Selecciona conversación"}</h2></div></div>
-              <div className="message-list" style={{ minHeight: 280 }}>
-                {(selectedConversation?.events || []).map((m) => <article key={`msg-thread-${m.id}`} className={`msg ${m.direction === "outbound" ? "user" : "assistant"}`}><strong>{m.channel} · {m.direction}</strong><p>{m.text}</p></article>)}
-              </div>
-              <form className="composer" onSubmit={(e) => { e.preventDefault(); void runAction("send-reply", sendReply); }}>
-                <input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Escribe respuesta..." />
-                <button className="primary-action" type="submit" disabled={pending["send-reply"]}>{pending["send-reply"] ? "Enviando..." : "Enviar"}</button>
+
+              <form className="chat-composer" onSubmit={(e) => { e.preventDefault(); void runAction("send-reply", sendReply); }}>
+                <input 
+                  value={replyText} 
+                  onChange={(e) => setReplyText(e.target.value)} 
+                  placeholder="Escribe tu mensaje..." 
+                  disabled={!selectedConversation || pending["send-reply"]}
+                />
+                <button 
+                  className="primary-action" 
+                  type="submit" 
+                  disabled={!selectedConversation || !replyText.trim() || pending["send-reply"]}
+                >
+                  <Send size={16} /> {pending["send-reply"] ? "Enviando" : "Enviar"}
+                </button>
               </form>
-            </section>
-            <section className="ops-panel">
-              <div className="panel-title"><div><p>Envío directo</p><h2>WhatsApp / Telegram</h2></div></div>
-              <div className="assistant-editor">
-                <label>WhatsApp destino<input value={waTo} onChange={(e) => setWaTo(e.target.value)} /></label>
-                <label>Mensaje WhatsApp<textarea value={waText} onChange={(e) => setWaText(e.target.value)} /></label>
-                <button className="primary-action" onClick={() => void runAction("send-whatsapp", sendWhatsApp)} type="button" disabled={pending["send-whatsapp"]}>{pending["send-whatsapp"] ? "Enviando..." : "Enviar WhatsApp"}</button>
-                <label>Telegram Chat ID<input value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} /></label>
-                <label>Mensaje Telegram<textarea value={tgText} onChange={(e) => setTgText(e.target.value)} /></label>
-                <button className="primary-action" onClick={() => void runAction("send-telegram", sendTelegram)} type="button" disabled={pending["send-telegram"]}>{pending["send-telegram"] ? "Enviando..." : "Enviar Telegram"}</button>
+            </div>
+
+            <div className="chat-thread-panel">
+              <div className="chat-list-header">
+                <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Envío Directo (Manual)</h2>
               </div>
-            </section>
+              <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "16px", overflowY: "auto" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "0.85rem", color: "var(--text-2)", fontWeight: "500" }}>WhatsApp destino</label>
+                  <input 
+                    value={waTo} 
+                    onChange={(e) => setWaTo(e.target.value)} 
+                    style={{ background: "rgba(0,0,0,0.2)", border: "1px solid var(--line)", padding: "10px", borderRadius: "6px", color: "white" }} 
+                  />
+                  <label style={{ fontSize: "0.85rem", color: "var(--text-2)", fontWeight: "500" }}>Mensaje WhatsApp</label>
+                  <textarea 
+                    value={waText} 
+                    onChange={(e) => setWaText(e.target.value)} 
+                    style={{ background: "rgba(0,0,0,0.2)", border: "1px solid var(--line)", padding: "10px", borderRadius: "6px", color: "white", minHeight: "80px", resize: "vertical" }} 
+                  />
+                  <button className="primary-action" onClick={() => void runAction("send-whatsapp", sendWhatsApp)} type="button" disabled={pending["send-whatsapp"]}>
+                    {pending["send-whatsapp"] ? "Enviando..." : "Enviar WhatsApp"}
+                  </button>
+                </div>
+
+                <div style={{ height: "1px", background: "var(--line)", margin: "4px 0" }} />
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "0.85rem", color: "var(--text-2)", fontWeight: "500" }}>Telegram Chat ID</label>
+                  <input 
+                    value={tgChatId} 
+                    onChange={(e) => setTgChatId(e.target.value)} 
+                    style={{ background: "rgba(0,0,0,0.2)", border: "1px solid var(--line)", padding: "10px", borderRadius: "6px", color: "white" }} 
+                  />
+                  <label style={{ fontSize: "0.85rem", color: "var(--text-2)", fontWeight: "500" }}>Mensaje Telegram</label>
+                  <textarea 
+                    value={tgText} 
+                    onChange={(e) => setTgText(e.target.value)} 
+                    style={{ background: "rgba(0,0,0,0.2)", border: "1px solid var(--line)", padding: "10px", borderRadius: "6px", color: "white", minHeight: "80px", resize: "vertical" }} 
+                  />
+                  <button className="primary-action" onClick={() => void runAction("send-telegram", sendTelegram)} type="button" disabled={pending["send-telegram"]}>
+                    {pending["send-telegram"] ? "Enviando..." : "Enviar Telegram"}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -598,24 +840,7 @@ export default function App() {
           </section>
         )}
 
-        {section === "powerDialer" && (
-          <section className="ops-panel wide">
-            <div className="panel-title"><div><p>Marcación</p><h2>Power Dialer</h2></div></div>
-            <div className="form-grid compact">
-              <label>Buscar cliente<input value={customerSearchQuery} onChange={(e) => setCustomerSearchQuery(e.target.value)} placeholder="Nombre, empresa, email o teléfono" /></label>
-              <label>Número<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label>
-            </div>
-            <div className="header-actions">
-              <button className="secondary-action" onClick={() => void runAction("dialer-search", searchCustomer)} disabled={pending["dialer-search"]}>{pending["dialer-search"] ? "Buscando..." : "Buscar"}</button>
-              <button className="primary-action" onClick={() => void runAction("dialer-call", startOutboundCall)} disabled={pending["dialer-call"]}>{pending["dialer-call"] ? "Llamando..." : "Llamar"}</button>
-              <button className="secondary-action" onClick={() => dialerNext()} disabled={powerDialerQueue.length === 0}>Siguiente</button>
-              <button className="danger-action" onClick={() => void runAction("dialer-hangup", hangupCall)} disabled={pending["dialer-hangup"]}>{pending["dialer-hangup"] ? "Colgando..." : "Colgar"}</button>
-            </div>
-            <p className="muted">Contacto actual: {activeDialerContact?.name || "N/D"} ({powerDialerIndex + 1}/{Math.max(powerDialerQueue.length, 1)})</p>
-            <button className="secondary-action" onClick={() => void runAction("dialer-queue", loadDialerQueue)} disabled={pending["dialer-queue"]}>{pending["dialer-queue"] ? "Cargando..." : "Cargar cola CRM"}</button>
-            <p className="muted">Estado: {callStatus}</p>
-          </section>
-        )}
+
 
         {section === "evaluations" && (
           <section className="ops-panel wide">

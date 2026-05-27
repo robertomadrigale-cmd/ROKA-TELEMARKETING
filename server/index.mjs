@@ -972,6 +972,20 @@ app.post("/api/telephony/call/outbound", async (req, res) => {
       metadata: { callSid: call.sid },
     },
   });
+  const entityId = req.body?.customerRef?.crmEntityId || req.body?.customerId;
+  if (entityId) {
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: req.body?.customerRef?.crmEntityType || "contacts",
+        entityId: String(entityId),
+        activityType: "call",
+        title: `Llamada saliente a ${to}`,
+        description: "Iniciada a través de Telefonía ROKA",
+        metadata: { callSid: call.sid, status: call.status }
+      }
+    });
+  }
   res.json({ ok: true, callSid: call.sid, status: call.status });
   } catch (error) {
     res.status(400).json({ error: "No se pudo originar la llamada.", detail: error instanceof Error ? error.message : "Error desconocido" });
