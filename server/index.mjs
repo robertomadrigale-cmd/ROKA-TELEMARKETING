@@ -161,11 +161,11 @@ const emptyProviderConfig = {
 const envConfig = {
   version: 1,
   company: process.env.DEFAULT_COMPANY || "ROKA",
-  assistantName: process.env.ASSISTANT_NAME || "Instructor ROKA",
+  assistantName: process.env.ASSISTANT_NAME || "Agente ROKA",
   systemInstructions:
     process.env.SYSTEM_INSTRUCTIONS ||
-    "Eres un instructor de capacitacion. Responde solo con informacion aprobada cuando el modo estricto este activo. Da pasos claros, ejemplos practicos y preguntas de verificacion.",
-  strictKnowledge: true,
+    "Eres un asistente comercial de telemarketing. Tu objetivo es convertir, calificar y agendar seguimiento con datos del CRM.",
+  strictKnowledge: false,
   activeProvider: process.env.DEFAULT_AI_PROVIDER || "openai",
   activeAvatarProvider: process.env.DEFAULT_AVATAR_PROVIDER || "talkinghead",
   providers: {
@@ -267,6 +267,7 @@ const inboxState = {
 const authState = {
   firebaseIdToken: "",
 };
+const defaultAgent = "roka-agent-1";
 
 function asString(value, maxLength = 4000) {
   if (typeof value !== "string") return "";
@@ -371,7 +372,7 @@ function getOrCreateConversation(input = {}) {
       id: `conv-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
       customerKey,
       customerRef,
-      assignedTo: input.assignedTo || "unassigned",
+      assignedTo: input.assignedTo || defaultAgent,
       status: "new",
       lastChannel: input.channel || "voice",
       lastDirection: input.direction || "inbound",
@@ -487,7 +488,7 @@ function normalizeConfig(input = {}, base = {}) {
   return {
     version: 1,
     company: asString(input.company ?? base.company ?? envConfig.company, 160) || "ROKA",
-    assistantName: asString(input.assistantName ?? base.assistantName ?? envConfig.assistantName, 160) || "Instructor ROKA",
+    assistantName: asString(input.assistantName ?? base.assistantName ?? envConfig.assistantName, 160) || "Agente ROKA",
     systemInstructions:
       asString(input.systemInstructions ?? base.systemInstructions ?? envConfig.systemInstructions, 12000) ||
       envConfig.systemInstructions,
@@ -1304,7 +1305,7 @@ app.post("/api/inbox/list", async (req, res) => {
 
 app.post("/api/inbox/assign", async (req, res) => {
   const conversationId = asString(req.body?.conversationId, 120);
-  const assignedTo = asString(req.body?.assignedTo, 120) || "unassigned";
+  const assignedTo = asString(req.body?.assignedTo, 120) || defaultAgent;
   const row = Array.from(inboxState.conversations.values()).find((item) => item.id === conversationId);
   if (!row) {
     res.status(404).json({ error: "Conversacion no encontrada." });
@@ -1314,6 +1315,38 @@ app.post("/api/inbox/assign", async (req, res) => {
   row.updatedAt = nowIso();
   inboxState.conversations.set(row.customerKey, row);
   res.json({ ok: true, item: row });
+});
+
+app.post("/api/crm/contacts", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const result = await fetchCrmBridge(config, {
+    action: "listCollection",
+    listCollection: {
+      name: "contacts",
+      limit: Number(req.body?.limit || 100),
+    },
+  });
+  if (!result.ok) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result.data);
+});
+
+app.post("/api/crm/leads", async (req, res) => {
+  const config = await getEffectiveConfig();
+  const result = await fetchCrmBridge(config, {
+    action: "listCollection",
+    listCollection: {
+      name: "leads",
+      limit: Number(req.body?.limit || 100),
+    },
+  });
+  if (!result.ok) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result.data);
 });
 
 app.post("/api/inbox/:id/messages", async (req, res) => {

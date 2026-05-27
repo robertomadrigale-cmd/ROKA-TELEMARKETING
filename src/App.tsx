@@ -137,6 +137,15 @@ type InboxConversation = {
   updatedAt: string;
 };
 
+type CrmContact = {
+  id: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  account?: string;
+  updated_at?: string;
+};
+
 type BackendHealth = {
   ok: boolean;
   livekit: boolean;
@@ -510,6 +519,8 @@ export function App() {
   const [wrapReason, setWrapReason] = useState("");
   const [wrapNotes, setWrapNotes] = useState("");
   const [wrapFollowUpAt, setWrapFollowUpAt] = useState("");
+  const [crmContacts, setCrmContacts] = useState<CrmContact[]>([]);
+  const [crmLeads, setCrmLeads] = useState<CrmContact[]>([]);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [selectedBuiltInAvatar, setSelectedBuiltInAvatar] = useState<string>(() => {
     try {
@@ -574,11 +585,27 @@ export function App() {
 
   useEffect(() => {
     void loadInbox();
+    void loadCrmContacts();
     const timer = window.setInterval(() => {
       void loadInbox();
     }, 8000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const loadCrmContacts = async () => {
+    try {
+      const [contactsRes, leadsRes] = await Promise.all([
+        fetch("/api/crm/contacts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 200 }) }),
+        fetch("/api/crm/leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 200 }) }),
+      ]);
+      const contactsData = await readJsonResponse(contactsRes);
+      const leadsData = await readJsonResponse(leadsRes);
+      if (contactsRes.ok) setCrmContacts(Array.isArray(contactsData.items) ? contactsData.items : []);
+      if (leadsRes.ok) setCrmLeads(Array.isArray(leadsData.items) ? leadsData.items : []);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo cargar CRM.");
+    }
+  };
 
   const refreshBackend = async () => {
     try {
@@ -1467,53 +1494,31 @@ export function App() {
         )}
 
         {section === "calls" && (
-          <SessionView
-            activeProvider={activeProvider}
-            input={input}
-            liveKitStatus={liveKitStatus}
-            messages={messages}
-            notice={notice}
-            openAiRealtimeStatus={openAiRealtimeStatus}
-            remoteParticipants={remoteParticipants}
-            settings={settings}
-            selectedBuiltInAvatar={selectedBuiltInAvatar}
-            onSelectBuiltInAvatar={setSelectedBuiltInAvatar}
-            onAvatarUrl={saveReadyPlayerAvatar}
-            onOpenAvatarCreator={() => setAvatarCreatorOpen(true)}
-            onSelectAvatar={selectAvatarChoice}
-            voiceSource={voiceSource}
-            setInput={setInput}
-            onConnectLiveKit={connectLiveKit}
-            onConnectOpenAiRealtime={connectOpenAiRealtime}
-            onSend={sendMessage}
+          <CallsDeskView
             callStatus={callStatus}
             dialNumber={dialNumber}
             selectedCustomer={selectedCustomer}
-            scriptDraft={scriptDraft}
             setDialNumber={setDialNumber}
-            setScriptDraft={setScriptDraft}
             onConnectTwilio={connectTwilioDevice}
             onDial={startOutboundCall}
             onHangup={hangupCall}
             onSearchCustomer={searchCustomerByPhone}
             onGenerateScript={generateScript}
-            didStatus={didStatus}
-            didVideoRef={didVideoRef}
-            didPoster={getDidAvatarSource()}
-            didDebug={didDebug}
-            onConnectDidStream={connectDidStream}
+            scriptDraft={scriptDraft}
+            setScriptDraft={setScriptDraft}
           />
         )}
 
         {section === "contacts" && (
-          <KnowledgeView
-            items={knowledge}
-            settings={settings}
-            setSettings={setSettings}
-            onDelete={deleteKnowledge}
-            onSave={saveServerConfig}
-            onUpload={uploadKnowledge}
-            strict={settings.strictKnowledge}
+          <ContactsView
+            contacts={crmContacts}
+            leads={crmLeads}
+            onRefresh={loadCrmContacts}
+            onSelect={(row) => {
+              setSelectedCustomer(row);
+              setDialNumber(String(row.phone || ""));
+              setSection("calls");
+            }}
           />
         )}
 
@@ -1612,24 +1617,16 @@ function SettingsView({
             <input value={settings.company} onChange={(event) => setSettings((current) => ({ ...current, company: event.target.value }))} />
           </label>
           <label>
+            Asistente comercial
+            <input value={settings.assistantName} onChange={(event) => setSettings((current) => ({ ...current, assistantName: event.target.value }))} />
+          </label>
+          <label>
             IA principal
             <select value={settings.activeProvider} onChange={(event) => setSettings((current) => ({ ...current, activeProvider: event.target.value as ProviderId }))}>
               {providerCatalog.filter((provider) => provider.kind.includes("IA") || provider.id === "pipecat").map((provider) => (
                 <option key={provider.id} value={provider.id}>{provider.name}</option>
               ))}
             </select>
-          </label>
-          <label>
-            Avatar
-            <select value={settings.activeAvatarProvider} onChange={(event) => setSettings((current) => ({ ...current, activeAvatarProvider: event.target.value as ProviderId }))}>
-              {providerCatalog.filter(isAvatarProvider).map((provider) => (
-                <option key={provider.id} value={provider.id}>{provider.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="check-row">
-            <input checked={settings.strictKnowledge} type="checkbox" onChange={(event) => setSettings((current) => ({ ...current, strictKnowledge: event.target.checked }))} />
-            Responder solo con documentos aprobados
           </label>
         </div>
 
@@ -1647,12 +1644,6 @@ function SettingsView({
           <ProviderCredentials id="elevenlabs" settings={settings} updateProvider={updateProvider} />
         </div>
 
-        <div className="config-section">
-          <h3>Avatares realtime</h3>
-          <ProviderCredentials id="heygen" settings={settings} updateProvider={updateProvider} />
-          <ProviderCredentials id="did" settings={settings} updateProvider={updateProvider} />
-        </div>
-
         {notice && <div className="notice">{notice}</div>}
       </section>
 
@@ -1667,7 +1658,7 @@ function SettingsView({
           <Status label="Backend" ok={Boolean(health?.ok)} />
           <Status label="LiveKit" ok={Boolean(settings.providers.livekit.url && settings.providers.livekit.apiKey && settings.providers.livekit.apiSecret)} />
           <Status label="IA activa" ok={Boolean(settings.providers[settings.activeProvider].apiKey || settings.activeProvider === "pipecat")} />
-          <Status label="Avatar" ok={Boolean(settings.providers[settings.activeAvatarProvider].apiKey)} />
+          <Status label="Twilio" ok={Boolean(settings.providers.twilio.accountSid && settings.providers.twilio.apiKeySid)} />
         </div>
       </section>
     </div>
@@ -2299,6 +2290,115 @@ function ConversationsView({
           <label>Follow-up<input type="datetime-local" value={wrapFollowUpAt} onChange={(event) => setWrapFollowUpAt(event.target.value)} /></label>
         </div>
         <button disabled={!selected} className="primary-action" onClick={() => selected && void onWrapUp(selected.id)} type="button">Cerrar interacción</button>
+      </section>
+    </div>
+  );
+}
+
+function CallsDeskView({
+  callStatus,
+  dialNumber,
+  selectedCustomer,
+  setDialNumber,
+  onConnectTwilio,
+  onDial,
+  onHangup,
+  onSearchCustomer,
+  onGenerateScript,
+  scriptDraft,
+  setScriptDraft,
+}: {
+  callStatus: CallStatus;
+  dialNumber: string;
+  selectedCustomer: Record<string, unknown> | null;
+  setDialNumber: (value: string) => void;
+  onConnectTwilio: () => Promise<void>;
+  onDial: () => Promise<void>;
+  onHangup: () => Promise<void>;
+  onSearchCustomer: () => Promise<void>;
+  onGenerateScript: () => Promise<void>;
+  scriptDraft: ScriptDraft;
+  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
+}) {
+  return (
+    <div className="ops-grid">
+      <section className="ops-panel">
+        <div className="panel-title"><div><p>Telefonía</p><h2>Llamadas</h2></div></div>
+        <div className="form-grid compact">
+          <label>Número<input value={dialNumber} placeholder="+52..." onChange={(event) => setDialNumber(event.target.value)} /></label>
+        </div>
+        <div className="header-actions">
+          <button className="secondary-action" onClick={() => void onConnectTwilio()} type="button">Conectar</button>
+          <button className="secondary-action" onClick={() => void onSearchCustomer()} type="button">Buscar cliente</button>
+          <button className="primary-action" onClick={() => void onDial()} type="button">Llamar</button>
+          <button className="danger-action" onClick={() => void onHangup()} type="button">Colgar</button>
+        </div>
+        <div className="runtime-strip"><span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado: {callStatus}</span></div>
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title"><div><p>Cliente</p><h2>Contexto CRM</h2></div></div>
+        <p className="muted">{selectedCustomer ? JSON.stringify(selectedCustomer) : "Selecciona o busca un cliente."}</p>
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title">
+          <div><p>Guion IA</p><h2>Asistencia de llamada</h2></div>
+          <button className="secondary-action" onClick={() => void onGenerateScript()} type="button">Generar</button>
+        </div>
+        <div className="assistant-editor">
+          <label>Apertura<textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((c) => ({ ...c, opening: event.target.value }))} /></label>
+          <label>Objeciones<textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((c) => ({ ...c, objectionHandling: event.target.value }))} /></label>
+          <label>Cierre<textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((c) => ({ ...c, closing: event.target.value }))} /></label>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ContactsView({
+  contacts,
+  leads,
+  onRefresh,
+  onSelect,
+}: {
+  contacts: CrmContact[];
+  leads: CrmContact[];
+  onRefresh: () => Promise<void>;
+  onSelect: (row: CrmContact) => void;
+}) {
+  return (
+    <div className="ops-grid">
+      <section className="ops-panel wide">
+        <div className="panel-title">
+          <div><p>CRM</p><h2>Contactos</h2></div>
+          <button className="secondary-action" onClick={() => void onRefresh()} type="button">Sincronizar</button>
+        </div>
+        <div className="data-table">
+          {contacts.map((item) => (
+            <article key={item.id} onClick={() => onSelect(item)} style={{ cursor: "pointer" }}>
+              <Building2 size={16} />
+              <div>
+                <strong>{item.name || "Sin nombre"}</strong>
+                <span>{item.email || item.phone || "Sin datos de contacto"}</span>
+              </div>
+              <span>{item.account || "-"}</span>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="ops-panel">
+        <div className="panel-title"><div><p>CRM</p><h2>Leads</h2></div></div>
+        <div className="data-table">
+          {leads.map((item) => (
+            <article key={item.id} onClick={() => onSelect(item)} style={{ cursor: "pointer" }}>
+              <FileText size={16} />
+              <div>
+                <strong>{item.name || "Lead sin nombre"}</strong>
+                <span>{item.email || item.phone || "Sin datos"}</span>
+              </div>
+              <span>{item.updated_at ? "Actualizado" : "-"}</span>
+            </article>
+          ))}
+        </div>
       </section>
     </div>
   );
