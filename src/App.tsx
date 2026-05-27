@@ -1583,8 +1583,6 @@ export function App() {
             settings={settings}
             setSettings={setSettings}
             updateProvider={updateProvider}
-            onAvatarUrl={saveReadyPlayerAvatar}
-            onOpenAvatarCreator={() => setAvatarCreatorOpen(true)}
           />
         )}
       </section>
@@ -2586,88 +2584,23 @@ function ScriptsView({
 }
 
 function ProviderView({
-  onAvatarUrl,
-  onOpenAvatarCreator,
   settings,
   setSettings,
   updateProvider,
 }: {
-  onAvatarUrl: (url: string) => void;
-  onOpenAvatarCreator: () => void;
   settings: AppSettings;
   setSettings: (settings: AppSettings | ((current: AppSettings) => AppSettings)) => void;
   updateProvider: (id: ProviderId, patch: Partial<ProviderConfig>) => void;
 }) {
-  const avatarProviders = providerCatalog.filter(isAvatarProvider);
-  const integrationProviders = providerCatalog.filter((provider) => !isAvatarProvider(provider));
+  const integrationProviders = providerCatalog.filter((provider) =>
+    ["twilio", "whatsapp", "telegram", "openai", "gemini", "elevenlabs", "livekit", "pipecat"].includes(provider.id),
+  );
   return (
     <div className="providers-layout">
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div>
-            <p>Avatares</p>
-            <h2>Gratis y premium</h2>
-          </div>
-        </div>
-        <div className="avatar-provider-grid">
-          {avatarProviders.map((provider) => {
-            const config = settings.providers[provider.id];
-            const selected = settings.activeAvatarProvider === provider.id;
-            return (
-              <article className={selected ? "avatar-provider selected" : "avatar-provider"} key={provider.id}>
-                <div className="avatar-preview">
-                  {provider.id === "readyplayerme" && isModelUrl(config.avatar) ? (
-                    <ModelViewer
-                      alt="Avatar Ready Player Me"
-                      className="provider-avatar-model"
-                      src={config.avatar}
-                    />
-                  ) : (
-                    <AvatarPreview id={provider.id} />
-                  )}
-                </div>
-                <div>
-                  <p>{provider.kind}</p>
-                  <h2>{provider.name}</h2>
-                  <span>{provider.use}</span>
-                </div>
-                <label>
-                  Avatar URL / ID
-                  {provider.id === "readyplayerme" ? (
-                    <input
-                      defaultValue={config.avatar || ""}
-                      placeholder="URL .glb Ready Player Me"
-                      onBlur={(event) => onAvatarUrl(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") onAvatarUrl(event.currentTarget.value);
-                      }}
-                    />
-                  ) : (
-                    <input
-                      value={provider.id === "did" ? config.agent || "" : config.avatar || ""}
-                      placeholder={provider.id === "heygen" ? "avatar_id de HeyGen" : provider.id === "did" ? "agent_id de D-ID" : "URL .glb Ready Player Me"}
-                      onChange={(event) => updateProvider(provider.id, provider.id === "did" ? { agent: event.target.value } : { avatar: event.target.value })}
-                    />
-                  )}
-                </label>
-                {provider.id === "readyplayerme" && (
-                  <button className="secondary-action" type="button" onClick={onOpenAvatarCreator}>
-                    Abrir creador 3D
-                  </button>
-                )}
-                <button className="primary-action" type="button" onClick={() => setSettings((current) => ({ ...current, activeAvatarProvider: provider.id }))}>
-                  {selected ? "Seleccionado" : "Usar avatar"}
-                </button>
-              </article>
-            );
-          })}
-        </div>
-      </section>
-
       <section className="provider-grid">
       {integrationProviders.map((provider) => {
         const config = settings.providers[provider.id];
-        const selected = settings.activeProvider === provider.id || settings.activeAvatarProvider === provider.id;
+        const selected = settings.activeProvider === provider.id;
         return (
           <article className={selected ? "provider-card selected" : "provider-card"} key={provider.id}>
             <div>
@@ -2685,11 +2618,6 @@ function ProviderView({
               {(provider.kind.includes("IA") || provider.id === "pipecat") && (
                 <button className="primary-action" type="button" onClick={() => setSettings((current) => ({ ...current, activeProvider: provider.id }))}>
                   Usar IA
-                </button>
-              )}
-              {isAvatarProvider(provider) && (
-                <button className="primary-action" type="button" onClick={() => setSettings((current) => ({ ...current, activeAvatarProvider: provider.id }))}>
-                  Usar avatar
                 </button>
               )}
             </div>

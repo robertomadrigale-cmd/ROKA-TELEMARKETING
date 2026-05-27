@@ -303,13 +303,17 @@ function normalizePhone(phone) {
 
 async function fetchCrmBridge(config, payload) {
   const twilioConfig = getTwilioConfig(config);
-  if (!twilioConfig.crmBridgeUrl || !twilioConfig.organizationId) {
+  const organizationId = twilioConfig.organizationId || "";
+  const hasAuthToken = Boolean(authState.firebaseIdToken);
+  if (!twilioConfig.crmBridgeUrl || (!organizationId && !hasAuthToken)) {
     return { ok: false, error: "CRM bridge no configurado." };
   }
   try {
     const headers = {
       "Content-Type": "application/json",
       "x-roka-local-link": "1",
+      origin: "https://roka-telemarketing.web.app",
+      referer: "https://roka-telemarketing.web.app/",
     };
     if (twilioConfig.bridgeToken) {
       headers["x-roka-crm-token"] = twilioConfig.bridgeToken;
@@ -321,7 +325,7 @@ async function fetchCrmBridge(config, payload) {
       method: "POST",
       headers,
       body: JSON.stringify({
-        organizationId: twilioConfig.organizationId,
+        ...(organizationId ? { organizationId } : {}),
         ...payload,
       }),
     });
