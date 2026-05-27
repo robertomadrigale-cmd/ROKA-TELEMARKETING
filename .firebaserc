@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "roka-crm-c437f"
+  },
+  "targets": {
+    "roka-crm-c437f": {
+      "hosting": {
+        "telemarketing": [
+          "roka-telemarketing"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
