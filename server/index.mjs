@@ -1370,34 +1370,58 @@ app.post("/api/inbox/assign", async (req, res) => {
 
 app.post("/api/crm/contacts", async (req, res) => {
   const config = await getEffectiveConfig();
+  const query = asString(req.body?.query || "", 200).toLowerCase();
   const result = await fetchCrmBridge(config, {
     action: "listCollection",
     listCollection: {
       name: "contacts",
-      limit: Number(req.body?.limit || 100),
+      limit: Number(req.body?.limit || 250),
     },
   });
   if (!result.ok) {
     res.status(400).json(result);
     return;
   }
-  res.json(result.data);
+  const items = Array.isArray(result.data?.items) ? result.data.items : [];
+  if (!query) {
+    res.json({ ...result.data, items });
+    return;
+  }
+  const filtered = items.filter((item) => {
+    const blob = [item?.name, item?.account, item?.email, item?.phone, item?.company]
+      .map((value) => String(value || "").toLowerCase())
+      .join(" ");
+    return blob.includes(query);
+  });
+  res.json({ ...result.data, items: filtered });
 });
 
 app.post("/api/crm/leads", async (req, res) => {
   const config = await getEffectiveConfig();
+  const query = asString(req.body?.query || "", 200).toLowerCase();
   const result = await fetchCrmBridge(config, {
     action: "listCollection",
     listCollection: {
       name: "leads",
-      limit: Number(req.body?.limit || 100),
+      limit: Number(req.body?.limit || 250),
     },
   });
   if (!result.ok) {
     res.status(400).json(result);
     return;
   }
-  res.json(result.data);
+  const items = Array.isArray(result.data?.items) ? result.data.items : [];
+  if (!query) {
+    res.json({ ...result.data, items });
+    return;
+  }
+  const filtered = items.filter((item) => {
+    const blob = [item?.name, item?.company, item?.email, item?.phone, item?.source, item?.status]
+      .map((value) => String(value || "").toLowerCase())
+      .join(" ");
+    return blob.includes(query);
+  });
+  res.json({ ...result.data, items: filtered });
 });
 
 app.post("/api/inbox/:id/messages", async (req, res) => {

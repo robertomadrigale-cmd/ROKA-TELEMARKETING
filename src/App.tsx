@@ -1,2777 +1,435 @@
-import {
-  Activity,
-  BookOpen,
-  Bot,
-  Building2,
-  CheckCircle2,
-  ChevronRight,
-  CircleAlert,
-  Database,
-  FileText,
-  KeyRound,
-  MessageSquare,
-  Mic,
-  MonitorPlay,
-  Phone,
-  PlugZap,
-  Radio,
-  Save,
-  ServerCog,
-  Settings,
-  ShieldCheck,
-  Trash2,
-  Upload,
-  Video,
-  Volume2,
-  X,
-} from "lucide-react";
-import "@google/model-viewer";
-import { createLocalAudioTrack, Room } from "livekit-client";
+import { Building2, MessageSquare, Phone, Radio, Save, Send, Settings, Sparkles, UserCircle2 } from "lucide-react";
 import { Device as TwilioDevice } from "@twilio/voice-sdk";
-import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/auth";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, getRedirectResult, User } from "firebase/auth";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { firebaseAuth, googleProvider } from "./firebase";
 
 type Section = "conversations" | "calls" | "powerDialer" | "contacts" | "messages" | "scripts" | "evaluations" | "providers" | "settings";
-type Role = "assistant" | "user" | "system";
-type ProviderId =
-  | "openai"
-  | "gemini"
-  | "elevenlabs"
-  | "heygen"
-  | "did"
-  | "livekit"
-  | "pipecat"
-  | "talkinghead"
-  | "readyplayerme"
-  | "twilio"
-  | "whatsapp"
-  | "telegram";
-type LiveKitStatus = "disconnected" | "connecting" | "connected" | "error";
-type RealtimeStatus = "disconnected" | "connecting" | "connected" | "error";
-
-type ProviderConfig = {
-  enabled: boolean;
-  model: string;
-  apiKey: string;
-  url?: string;
-  voice?: string;
-  avatar?: string;
-  agent?: string;
-  apiSecret?: string;
-  agentName?: string;
-  accountSid?: string;
-  apiKeySid?: string;
-  apiKeySecret?: string;
-  twimlAppSid?: string;
-  phoneNumber?: string;
-  webhookAuthToken?: string;
-  callerName?: string;
-  crmBridgeUrl?: string;
-  bridgeToken?: string;
-  organizationId?: string;
-  allowedOrigins?: string;
-  provider?: string;
-  from?: string;
-  botToken?: string;
-  defaultChatId?: string;
-};
-
+type ProviderId = "twilio" | "whatsapp" | "telegram";
+type CallStatus = "idle" | "ready" | "ringing" | "in-call" | "ended" | "error";
+type CrmContact = { id: string; name?: string; email?: string; phone?: string; account?: string; company?: string; collection?: string };
+type InboxConversation = { id: string; customerKey: string; status: string; assignedTo: string; lastChannel: string; events: Array<{ id: string; text: string; direction: string; channel: string }> };
+type ScriptDraft = { opening: string; discovery: string; objectionHandling: string; closing: string; nextSteps: string };
 type AppSettings = {
   company: string;
-  assistantName: string;
-  systemInstructions: string;
-  activeProvider: ProviderId;
-  activeAvatarProvider: ProviderId;
-  strictKnowledge: boolean;
-  providers: Record<ProviderId, ProviderConfig>;
+  activeProvider: "openai";
+  providers: Record<ProviderId, {
+    enabled?: boolean;
+    model?: string;
+    accountSid?: string;
+    apiKeySid?: string;
+    apiKeySecret?: string;
+    twimlAppSid?: string;
+    phoneNumber?: string;
+    webhookAuthToken?: string;
+    crmBridgeUrl?: string;
+    bridgeToken?: string;
+    organizationId?: string;
+    allowedOrigins?: string;
+    provider?: string;
+    from?: string;
+    botToken?: string;
+    defaultChatId?: string;
+  }>;
 };
-
-type KnowledgeItem = {
-  id: number;
-  title: string;
-  type: string;
-  owner: string;
-  status: "Indexado" | "Pendiente" | "Revision";
-  updated: string;
-};
-
-type Message = {
-  id: number;
-  role: Role;
-  text: string;
-};
-
-type DidDebug = {
-  connection: string;
-  ice: string;
-  lastStep: string;
-  lastSpeech: string;
-  streamId: string;
-  sessionId: string;
-  video: string;
-  error: string;
-};
-
-type CallStatus = "idle" | "ready" | "ringing" | "in-call" | "ended" | "error";
-
-type ScriptDraft = {
-  opening: string;
-  discovery: string;
-  objectionHandling: string;
-  closing: string;
-  nextSteps: string;
-};
-
-type InboxConversation = {
-  id: string;
-  customerKey: string;
-  customerRef: Record<string, unknown>;
-  assignedTo: string;
-  status: "new" | "active" | "waiting" | "wrap_up_required" | "closed";
-  lastChannel: "voice" | "whatsapp" | "telegram";
-  lastDirection: "inbound" | "outbound";
-  events: Array<{ id: string; text: string; channel: string; direction: string; createdAt: string; status: string }>;
-  wrapUp?: { outcome?: string; reason?: string; notes?: string; followUpAt?: string | null; followUpType?: string | null } | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type CrmContact = {
-  id: string;
-  name?: string;
-  email?: string;
-  phone?: string;
-  account?: string;
-  updated_at?: string;
-};
-
-type BackendHealth = {
-  ok: boolean;
-  livekit: boolean;
-  providers: Record<string, boolean>;
-};
-
-const providerCatalog: Array<{
-  id: ProviderId;
-  name: string;
-  kind: string;
-  use: string;
-  defaultModel: string;
-  needs: string[];
-}> = [
-  {
-    id: "twilio",
-    name: "Twilio Voice",
-    kind: "Telefonia",
-    use: "Llamadas entrantes y salientes PSTN para central de telemarketing.",
-    defaultModel: "voice-central",
-    needs: ["Account SID", "API Key SID", "API Key Secret", "TwiML App SID", "Numero"],
-  },
-  {
-    id: "whatsapp",
-    name: "WhatsApp",
-    kind: "Mensajeria",
-    use: "Envio de mensajes de seguimiento por WhatsApp.",
-    defaultModel: "messaging",
-    needs: ["Provider", "From number"],
-  },
-  {
-    id: "telegram",
-    name: "Telegram",
-    kind: "Mensajeria",
-    use: "Envio de mensajes operativos y comerciales por Telegram.",
-    defaultModel: "messaging",
-    needs: ["Bot token", "Chat ID"],
-  },
-  {
-    id: "openai",
-    name: "OpenAI Realtime",
-    kind: "IA realtime",
-    use: "Conversacion voz a voz, baja latencia, tool calling y respuestas naturales.",
-    defaultModel: "gpt-realtime",
-    needs: ["API key", "Modelo"],
-  },
-  {
-    id: "gemini",
-    name: "Gemini Live",
-    kind: "IA realtime",
-    use: "Agente multimodal con audio, texto e imagen.",
-    defaultModel: "gemini-live-2.5-flash-preview",
-    needs: ["API key", "Modelo"],
-  },
-  {
-    id: "elevenlabs",
-    name: "ElevenLabs",
-    kind: "Voz",
-    use: "Voces naturales, clonacion y agentes conversacionales.",
-    defaultModel: "eleven_turbo_v2_5",
-    needs: ["API key", "Voz"],
-  },
-  {
-    id: "heygen",
-    name: "HeyGen LiveAvatar",
-    kind: "Avatar",
-    use: "Avatar realista por WebRTC/WebSocket usando audio externo.",
-    defaultModel: "live-avatar",
-    needs: ["API key", "Avatar ID"],
-  },
-  {
-    id: "talkinghead",
-    name: "TalkingHead",
-    kind: "Avatar gratis",
-    use: "Avatar 3D open source con lip-sync en navegador usando Ready Player Me y Three.js.",
-    defaultModel: "talkinghead-web",
-    needs: ["Avatar URL opcional"],
-  },
-  {
-    id: "readyplayerme",
-    name: "Ready Player Me",
-    kind: "Avatar gratis",
-    use: "Avatares 3D gratuitos para web; se pueden usar con TalkingHead para lip-sync.",
-    defaultModel: "rpm-avatar",
-    needs: ["Avatar URL"],
-  },
-  {
-    id: "did",
-    name: "D-ID Realtime",
-    kind: "Avatar",
-    use: "Agente visual realtime con streaming WebRTC.",
-    defaultModel: "agents-v4",
-    needs: ["API key", "Agent ID"],
-  },
-  {
-    id: "livekit",
-    name: "LiveKit",
-    kind: "Transporte",
-    use: "Sala WebRTC para conectar navegador, agente, voz y avatar.",
-    defaultModel: "agent-dispatch",
-    needs: ["URL", "API key", "API secret"],
-  },
-  {
-    id: "pipecat",
-    name: "Pipecat",
-    kind: "Orquestacion",
-    use: "Pipeline open source STT + LLM + TTS + transporte.",
-    defaultModel: "pipeline-local",
-    needs: ["Endpoint", "Modelo"],
-  },
-];
-
-const readyPlayerMeSampleAvatar = "";
-const neutralSampleAvatar = "";
-const legacyReadyPlayerMeSampleAvatar = "https://models.readyplayer.me/6185a4acfb622cf1cdc49348.glb";
-const legacyHalfBodyAvatar = "https://raw.githubusercontent.com/readyplayerme/visage/main/public/half-body.glb";
-const legacySoldierAvatar = "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Soldier.glb";
-
-type BuiltInAvatar = {
-  id: string;
-  name: string;
-  role: string;
-  description: string;
-  image: string;
-  modelUrl: string;
-  color: string;
-};
-
-const builtInAvatars: BuiltInAvatar[] = [
-  {
-    id: "executive",
-    name: "Mariana",
-    role: "Instructora Ejecutiva",
-    description: "Avatar 3D humano corporativo.",
-    image: "/avatars/executive.png",
-    modelUrl: "/avatars/michelle.glb",
-    color: "#6b4c8a",
-  },
-  {
-    id: "mentor",
-    name: "Valeria",
-    role: "Mentora Técnica",
-    description: "Modelo 3D (Kira).",
-    image: "/avatars/mentor.png",
-    modelUrl: "/avatars/kira.glb",
-    color: "#2a7a8c",
-  }
-];
 
 const defaultSettings: AppSettings = {
   company: "ROKA",
-  assistantName: "Agente ROKA",
-  systemInstructions:
-    "Eres un asistente especializado en telemarketing y seguimiento comercial. Crea guiones claros y accionables con base en CRM y la informacion del usuario.",
   activeProvider: "openai",
-  activeAvatarProvider: "did",
-  strictKnowledge: true,
   providers: {
-    openai: { enabled: true, model: "gpt-realtime", apiKey: "" },
-    gemini: { enabled: false, model: "gemini-live-2.5-flash-preview", apiKey: "" },
-    elevenlabs: { enabled: false, model: "eleven_turbo_v2_5", apiKey: "", voice: "Marin" },
-    heygen: { enabled: false, model: "live-avatar", apiKey: "", avatar: "" },
-    did: { enabled: false, model: "agents-v4", apiKey: "", agent: "" },
-    talkinghead: { enabled: true, model: "talkinghead-web", apiKey: "", avatar: readyPlayerMeSampleAvatar },
-    readyplayerme: { enabled: true, model: "rpm-avatar", apiKey: "", avatar: readyPlayerMeSampleAvatar },
-    twilio: {
-      enabled: false,
-      model: "voice-central",
-      apiKey: "",
-      accountSid: "",
-      apiKeySid: "",
-      apiKeySecret: "",
-      twimlAppSid: "",
-      phoneNumber: "",
-      webhookAuthToken: "",
-      callerName: "ROKA Agente",
-      crmBridgeUrl: "",
-      bridgeToken: "",
-      organizationId: "",
-      allowedOrigins: "",
-    },
-    whatsapp: {
-      enabled: false,
-      model: "messaging",
-      apiKey: "",
-      provider: "twilio",
-      from: "whatsapp:+14155238886",
-    },
-    telegram: {
-      enabled: false,
-      model: "messaging",
-      apiKey: "",
-      botToken: "",
-      defaultChatId: "",
-    },
-    livekit: { enabled: false, model: "agent-dispatch", apiKey: "", apiSecret: "", url: "", agentName: "" },
-    pipecat: { enabled: false, model: "pipeline-local", apiKey: "", url: "http://localhost:7860" },
+    twilio: { model: "voice-central", callerName: "ROKA Agente" } as any,
+    whatsapp: { model: "messaging", provider: "twilio", from: "" },
+    telegram: { model: "messaging", botToken: "", defaultChatId: "" },
   },
 };
 
-const starterKnowledge: KnowledgeItem[] = [
-  { id: 1, title: "Induccion operativa ROKA", type: "Curso", owner: "RH", status: "Indexado", updated: "Inicial" },
-  { id: 2, title: "Protocolos de seguridad industrial", type: "Manual", owner: "Seguridad", status: "Indexado", updated: "Inicial" },
-];
-
-const avatarChoices: Array<{
-  id: string;
-  provider: ProviderId;
-  name: string;
-  label: string;
-  value: string;
-  style: "free" | "premium";
-  image: string;
-}> = [
-  {
-    id: "upload-3d",
-    provider: "readyplayerme",
-    name: "Subir GLB",
-    label: "3D Local",
-    value: "",
-    style: "free",
-    image: "/avatars/ready-player-me.svg",
-  },
-  {
-    id: "heygen-custom",
-    provider: "heygen",
-    name: "HeyGen",
-    label: "Premium",
-    value: "",
-    style: "premium",
-    image: "/avatars/heygen.svg",
-  },
-  {
-    id: "did-custom",
-    provider: "did",
-    name: "D-ID",
-    label: "Premium",
-    value: "",
-    style: "premium",
-    image: "/avatars/d-id.svg",
-  },
-];
-
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem("roka-ai-settings");
-    if (!raw) return defaultSettings;
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    const mergedProviders = {
-      ...defaultSettings.providers,
-      ...(parsed.providers || {}),
-    };
-    if (
-      mergedProviders.readyplayerme.avatar === legacyReadyPlayerMeSampleAvatar ||
-      mergedProviders.readyplayerme.avatar === legacyHalfBodyAvatar ||
-      mergedProviders.readyplayerme.avatar === legacySoldierAvatar
-    ) {
-      mergedProviders.readyplayerme = { ...mergedProviders.readyplayerme, enabled: true, avatar: "" };
-    }
-    if (mergedProviders.talkinghead.avatar?.startsWith("builtin://") || mergedProviders.talkinghead.avatar === legacySoldierAvatar) {
-      mergedProviders.talkinghead = { ...mergedProviders.talkinghead, avatar: mergedProviders.readyplayerme.avatar };
-    }
-    const parsedTalkingHeadAvatar = parsed.providers?.talkinghead?.avatar || "";
-    const activeAvatarProvider =
-      parsed.activeAvatarProvider === "did"
-        ? "did"
-        : defaultSettings.activeAvatarProvider;
-    return {
-      ...defaultSettings,
-      ...parsed,
-      activeAvatarProvider,
-      providers: mergedProviders,
-    } as AppSettings;
-  } catch {
-    return defaultSettings;
-  }
-}
-
-function mask(value?: string) {
-  if (!value) return "Sin llave";
-  if (value.length < 8) return "Guardada";
-  return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
-
-function readReadyPlayerMessage(data: unknown) {
-  const payload = typeof data === "string" ? safeJson(data) : data;
-  if (!payload || typeof payload !== "object") return "";
-  const event = payload as { eventName?: string; data?: { url?: string } };
-  return event.eventName === "v1.avatar.exported" ? event.data?.url || "" : "";
-}
-
-function safeJson(value: string) {
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-function isModelUrl(value?: string) {
-  return Boolean(value && (/^https?:\/\/.+\.(glb|gltf)(\?|#|$)/i.test(value) || value.includes("models.readyplayer.me")));
-}
-
-function getActiveAvatarValue(settings: AppSettings) {
-  const config = settings.providers[settings.activeAvatarProvider];
-  return settings.activeAvatarProvider === "did" ? config.agent || "" : config.avatar || "";
-}
-
-function avatarAssetUrl(src?: string) {
-  if (!src) return "";
-  return /^https?:\/\//i.test(src) ? `/api/avatar/proxy?url=${encodeURIComponent(src)}` : src;
-}
-
-const didDefaultAvatar = "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
-const initialDidDebug: DidDebug = {
-  connection: "sin iniciar",
-  ice: "sin iniciar",
-  lastStep: "esperando Conectar D-ID",
-  lastSpeech: "sin hablar",
-  streamId: "",
-  sessionId: "",
-  video: "sin stream",
-  error: "",
-};
-
-async function readJsonResponse(response: Response) {
+async function readJson(response: Response) {
   const text = await response.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { error: text };
-  }
+  try { return JSON.parse(text || "{}"); } catch { return { raw: text }; }
 }
 
-export function App() {
+export default function App() {
   const [section, setSection] = useState<Section>("conversations");
-  const [settings, setSettings] = useState<AppSettings>(loadSettings);
-  const [knowledge, setKnowledge] = useState<KnowledgeItem[]>(starterKnowledge);
-  const [messages, setMessages] = useState<Message[]>([
-    { id: 1, role: "system", text: "Configura empresa, proveedor, modelo y llaves antes de iniciar una sesion real." },
-  ]);
-  const [input, setInput] = useState("");
-  const [health, setHealth] = useState<BackendHealth | null>(null);
-  const [liveKitStatus, setLiveKitStatus] = useState<LiveKitStatus>("disconnected");
-  const [remoteParticipants, setRemoteParticipants] = useState(0);
-  const [openAiRealtimeStatus, setOpenAiRealtimeStatus] = useState<RealtimeStatus>("disconnected");
-  const [voiceSource, setVoiceSource] = useState<"none" | "browser" | "openai" | "livekit-agent">("none");
   const [notice, setNotice] = useState("");
-  const [avatarCreatorOpen, setAvatarCreatorOpen] = useState(false);
-  const [avatarUrlDraft, setAvatarUrlDraft] = useState(settings.providers.readyplayerme.avatar || "");
-  const [callStatus, setCallStatus] = useState<CallStatus>("idle");
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [contacts, setContacts] = useState<CrmContact[]>([]);
+  const [contactQuery, setContactQuery] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState<CrmContact | null>(null);
+  const [inboxItems, setInboxItems] = useState<InboxConversation[]>([]);
+  const [selectedConvId, setSelectedConvId] = useState("");
+  const [replyText, setReplyText] = useState("");
+  const [wrapOutcome, setWrapOutcome] = useState("");
+  const [wrapReason, setWrapReason] = useState("");
+  const [wrapNotes, setWrapNotes] = useState("");
   const [dialNumber, setDialNumber] = useState("");
-  const [currentCallSid, setCurrentCallSid] = useState("");
-  const [selectedCustomer, setSelectedCustomer] = useState<Record<string, unknown> | null>(null);
-  const [scriptDraft, setScriptDraft] = useState<ScriptDraft>({
-    opening: "",
-    discovery: "",
-    objectionHandling: "",
-    closing: "",
-    nextSteps: "",
-  });
+  const [callStatus, setCallStatus] = useState<CallStatus>("idle");
   const [waTo, setWaTo] = useState("");
   const [waText, setWaText] = useState("");
   const [tgChatId, setTgChatId] = useState("");
   const [tgText, setTgText] = useState("");
-  const [inboxItems, setInboxItems] = useState<InboxConversation[]>([]);
-  const [selectedConversationId, setSelectedConversationId] = useState("");
-  const [conversationReply, setConversationReply] = useState("");
-  const [wrapOutcome, setWrapOutcome] = useState("");
-  const [wrapReason, setWrapReason] = useState("");
-  const [wrapNotes, setWrapNotes] = useState("");
-  const [wrapFollowUpAt, setWrapFollowUpAt] = useState("");
-  const [crmContacts, setCrmContacts] = useState<CrmContact[]>([]);
-  const [crmLeads, setCrmLeads] = useState<CrmContact[]>([]);
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [selectedBuiltInAvatar, setSelectedBuiltInAvatar] = useState<string>(() => {
-    try {
-      return localStorage.getItem("roka-builtin-avatar") || "executive";
-    } catch {
-      return "executive";
-    }
-  });
-  const roomRef = useRef<Room | null>(null);
+  const [scriptDraft, setScriptDraft] = useState<ScriptDraft>({ opening: "", discovery: "", objectionHandling: "", closing: "", nextSteps: "" });
   const twilioDeviceRef = useRef<TwilioDevice | null>(null);
-  const twilioCallRef = useRef<any>(null);
-  const openAiPeerRef = useRef<RTCPeerConnection | null>(null);
-  const openAiDataChannelRef = useRef<RTCDataChannel | null>(null);
-  const openAiAudioRef = useRef<HTMLAudioElement | null>(null);
+  const twilioCallSidRef = useRef("");
 
-  // D-ID WebRTC State
-  const didPeerRef = useRef<RTCPeerConnection | null>(null);
-  const [didStatus, setDidStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
-  const [didStreamId, setDidStreamId] = useState<string>("");
-  const [didSessionId, setDidSessionId] = useState<string>("");
-  const [didDebug, setDidDebug] = useState<DidDebug>(initialDidDebug);
-  const didVideoRef = useRef<HTMLVideoElement | null>(null);
-
-  const activeProvider = providerCatalog.find((provider) => provider.id === settings.activeProvider)!;
-  const livekitConfig = settings.providers.livekit;
-  const configuredCount = useMemo(
-    () => Object.values(settings.providers).filter((provider) => provider.enabled && (provider.apiKey || provider.url)).length,
-    [settings.providers],
-  );
+  const selectedConversation = useMemo(() => inboxItems.find((item) => item.id === selectedConvId) || null, [inboxItems, selectedConvId]);
 
   useEffect(() => {
-    localStorage.setItem("roka-ai-settings", JSON.stringify(settings));
-  }, [settings]);
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
-      setFirebaseUser(user);
-    });
-    return () => unsubscribe();
+    void boot();
+    const unsub = onAuthStateChanged(firebaseAuth, (user) => setAuthUser(user));
+    void getRedirectResult(firebaseAuth).catch(() => undefined);
+    return () => unsub();
   }, []);
 
-  useEffect(() => {
-    try { localStorage.setItem("roka-builtin-avatar", selectedBuiltInAvatar); } catch { /* noop */ }
-  }, [selectedBuiltInAvatar]);
+  async function boot() {
+    await Promise.all([loadConfig(), loadInbox(), loadContacts("")]);
+  }
 
-  useEffect(() => {
-    void refreshBackend();
-    fetch("/api/knowledge")
-      .then((res) => res.json())
-      .then((data) => Array.isArray(data.items) && setKnowledge(data.items))
-      .catch(() => undefined);
-  }, []);
+  async function loadConfig() {
+    const res = await fetch("/api/config");
+    const data = await readJson(res);
+    if (res.ok) setSettings((prev) => ({ ...prev, ...data }));
+  }
 
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      const url = readReadyPlayerMessage(event.data);
-      if (url) saveReadyPlayerAvatar(url);
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
+  async function saveConfig() {
+    const res = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
+    const data = await readJson(res);
+    setNotice(res.ok ? "Configuración guardada." : (data.error || "No se pudo guardar configuración."));
+  }
 
-  useEffect(() => {
-    void loadInbox();
-    void loadCrmContacts();
-    const timer = window.setInterval(() => {
-      void loadInbox();
-    }, 8000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const loadCrmContacts = async () => {
-    try {
-      const [contactsRes, leadsRes] = await Promise.all([
-        fetch("/api/crm/contacts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 200 }) }),
-        fetch("/api/crm/leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 200 }) }),
-      ]);
-      const contactsData = await readJsonResponse(contactsRes);
-      const leadsData = await readJsonResponse(leadsRes);
-      if (contactsRes.ok) setCrmContacts(Array.isArray(contactsData.items) ? contactsData.items : []);
-      if (leadsRes.ok) setCrmLeads(Array.isArray(leadsData.items) ? leadsData.items : []);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "No se pudo cargar CRM.");
-    }
-  };
-
-  const refreshBackend = async () => {
-    try {
-      const res = await fetch("/api/health");
-      setHealth(await res.json());
-    } catch {
-      setHealth(null);
-    }
-  };
-
-  const updateProvider = (id: ProviderId, patch: Partial<ProviderConfig>) => {
-    setSettings((current) => ({
-      ...current,
-      providers: {
-        ...current.providers,
-        [id]: { ...current.providers[id], ...patch },
-      },
-    }));
-  };
-
-  const saveReadyPlayerAvatar = (url: string) => {
-    const cleanUrl = url.trim();
-    if (!cleanUrl) return;
-    setSettings((current) => ({
-      ...current,
-      activeAvatarProvider: "readyplayerme",
-      providers: {
-        ...current.providers,
-        readyplayerme: {
-          ...current.providers.readyplayerme,
-          enabled: true,
-          avatar: cleanUrl,
-        },
-        talkinghead: {
-          ...current.providers.talkinghead,
-          enabled: true,
-          avatar: cleanUrl,
-        },
-      },
-    }));
-    setAvatarUrlDraft(cleanUrl);
-    setAvatarCreatorOpen(false);
-    setSection("calls");
-  };
-
-  const uploadAvatarModel = async (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".glb") && !file.name.toLowerCase().endsWith(".gltf")) {
-      setNotice("El avatar debe ser archivo .glb o .gltf.");
-      return;
-    }
-    const res = await fetch(`/api/avatar/upload?name=${encodeURIComponent(file.name)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: await file.arrayBuffer(),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setNotice(data.error || "No se pudo subir el avatar.");
-      return;
-    }
-    saveReadyPlayerAvatar(data.url);
-  };
-
-  const connectFirebaseSession = async (user: User) => {
+  async function connectFirebaseSession(user: User) {
     const token = await user.getIdToken();
-    await fetch("/api/auth/firebase/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-  };
+    await fetch("/api/auth/firebase/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+  }
 
-  const signInGoogle = async () => {
-    try {
-      const result = await signInWithPopup(firebaseAuth, googleProvider);
-      if (result.user) {
-        await connectFirebaseSession(result.user);
-        setNotice("Sesión Google conectada con CRM.");
-      }
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "No se pudo iniciar sesión.");
-    }
-  };
-
-  const signOutGoogle = async () => {
-    try {
-      await signOut(firebaseAuth);
-      await fetch("/api/auth/firebase/session", { method: "DELETE" });
-      setNotice("Sesión Google cerrada.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "No se pudo cerrar sesión.");
-    }
-  };
-
-  const connectTwilioDevice = async () => {
-    if (twilioDeviceRef.current) {
-      setCallStatus("ready");
-      return;
-    }
+  async function signInGoogle() {
+    setAuthBusy(true);
     setNotice("");
     try {
-      await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
-      });
-      const tokenRes = await fetch("/api/telephony/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identity: `${settings.company}-agente-web` }),
-      });
-      const tokenData = await readJsonResponse(tokenRes);
-      if (!tokenRes.ok || !tokenData.token) throw new Error(tokenData.error || "No se pudo crear token Twilio.");
-      const device = new TwilioDevice(tokenData.token, { logLevel: 1 });
-      device.on("registered", () => setCallStatus("ready"));
-      device.on("incoming", async (call) => {
-        twilioCallRef.current = call;
-        setCallStatus("ringing");
-        const from = String(call.parameters?.From || "");
-        setDialNumber(from);
-        try {
-          const customerRes = await fetch("/api/crm/search-customer", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ phone: from }),
-          });
-          const customerData = await readJsonResponse(customerRes);
-          if (customerRes.ok) setSelectedCustomer(customerData.results?.[0] || null);
-        } catch { /* noop */ }
-        await call.accept();
-        setCallStatus("in-call");
-      });
-      device.on("error", (error) => {
-        setCallStatus("error");
-        setNotice(error.message || "Error de dispositivo Twilio.");
-      });
-      device.on("destroyed", () => setCallStatus("idle"));
-      await device.register();
-      twilioDeviceRef.current = device;
-    } catch (error) {
-      setCallStatus("error");
-      setNotice(error instanceof Error ? error.message : "No se pudo conectar Twilio.");
-    }
-  };
-
-  const startOutboundCall = async () => {
-    if (!dialNumber.trim()) return;
-    try {
-      if (!twilioDeviceRef.current) await connectTwilioDevice();
-      setCallStatus("ringing");
-      const response = await fetch("/api/telephony/call/outbound", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: dialNumber,
-          customerName: selectedCustomer?.name || "",
-        }),
-      });
-      const data = await readJsonResponse(response);
-      if (!response.ok) throw new Error(data.error || "No se pudo iniciar llamada.");
-      setCurrentCallSid(data.callSid || "");
-      setCallStatus("in-call");
-    } catch (error) {
-      setCallStatus("error");
-      setNotice(error instanceof Error ? error.message : "Fallo en llamada saliente.");
-    }
-  };
-
-  const hangupCall = async () => {
-    try {
-      if (twilioCallRef.current) {
-        twilioCallRef.current.disconnect();
-        twilioCallRef.current = null;
-      }
-      if (currentCallSid) {
-        await fetch("/api/telephony/call/hangup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ callSid: currentCallSid }),
-        });
-      }
-      setCallStatus("ended");
+      googleProvider.setCustomParameters({ prompt: "select_account" });
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      if (result.user) await connectFirebaseSession(result.user);
+      setNotice("Sesión Google conectada.");
     } catch {
+      try {
+        await signInWithRedirect(firebaseAuth, googleProvider);
+      } catch (error: any) {
+        setNotice(error?.message || "No se pudo iniciar sesión con Google.");
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOutGoogle() {
+    await signOut(firebaseAuth);
+    await fetch("/api/auth/firebase/session", { method: "DELETE" });
+    setNotice("Sesión cerrada.");
+  }
+
+  async function loadContacts(query: string) {
+    const trimmed = query.trim();
+    const endpoint = trimmed ? "/api/crm/search-customer" : "/api/crm/contacts";
+    const body = trimmed ? { query: trimmed, limitPerCollection: 25 } : { limit: 120, query: "" };
+    const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await readJson(res);
+    if (!res.ok) {
+      setNotice(data.error || "No se pudo cargar CRM.");
+      setContacts([]);
+      return;
+    }
+    const list = Array.isArray(data.items)
+      ? data.items
+      : Array.isArray(data.results)
+        ? data.results
+        : [];
+    setContacts(list);
+  }
+
+  async function loadInbox() {
+    const res = await fetch("/api/inbox/list", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 80 }) });
+    const data = await readJson(res);
+    if (res.ok) setInboxItems(Array.isArray(data.items) ? data.items : []);
+  }
+
+  async function assignConversation(id: string) {
+    await fetch("/api/inbox/assign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: id, assignedTo: "roka-agent-1" }) });
+    await loadInbox();
+  }
+
+  async function sendReply() {
+    if (!selectedConversation || !replyText.trim()) return;
+    const channel = selectedConversation.lastChannel || "whatsapp";
+    const res = await fetch(`/api/inbox/${selectedConversation.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, direction: "outbound", text: replyText }),
+    });
+    const data = await readJson(res);
+    if (!res.ok) setNotice(data.error || "No se pudo enviar.");
+    setReplyText("");
+    await loadInbox();
+  }
+
+  async function wrapUpConversation() {
+    if (!selectedConversation) return;
+    const res = await fetch(`/api/inbox/${selectedConversation.id}/wrapup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outcome: wrapOutcome, reason: wrapReason, notes: wrapNotes }),
+    });
+    const data = await readJson(res);
+    setNotice(res.ok ? "Interacción cerrada." : (data.error || "No se pudo cerrar."));
+    await loadInbox();
+  }
+
+  async function connectTwilioDevice() {
+    if (twilioDeviceRef.current) return;
+    const tokenRes = await fetch("/api/telephony/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identity: "roka-agent-1" }) });
+    const tokenData = await readJson(tokenRes);
+    if (!tokenRes.ok || !tokenData.token) {
       setCallStatus("error");
+      setNotice(tokenData.error || "Twilio no está configurado.");
+      return;
     }
-  };
+    const device = new TwilioDevice(tokenData.token, { logLevel: 1 });
+    device.on("registered", () => setCallStatus("ready"));
+    device.on("incoming", async (call) => {
+      setCallStatus("ringing");
+      const from = String(call.parameters?.From || "");
+      setDialNumber(from);
+      await call.accept();
+      setCallStatus("in-call");
+    });
+    device.on("error", (error) => { setCallStatus("error"); setNotice(error.message || "Error Twilio."); });
+    await device.register();
+    twilioDeviceRef.current = device;
+  }
 
-  const searchCustomerByPhone = async () => {
-    try {
-      const res = await fetch("/api/crm/search-customer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: dialNumber }),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "No se pudo buscar cliente.");
-      setSelectedCustomer(data.results?.[0] || null);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Error buscando cliente.");
-    }
-  };
+  async function searchCustomer() {
+    if (!dialNumber.trim()) return;
+    const res = await fetch("/api/crm/search-customer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: dialNumber }) });
+    const data = await readJson(res);
+    if (!res.ok) { setNotice(data.error || "No se pudo buscar cliente."); return; }
+    const first = Array.isArray(data.results) ? data.results[0] : null;
+    setSelectedCustomer(first);
+    if (first) setNotice(`Cliente encontrado: ${first.name || first.id}`);
+  }
 
-  const generateScript = async () => {
-    try {
-      const res = await fetch("/api/script/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customer: selectedCustomer || { phone: dialNumber },
-          contextRows: selectedCustomer ? [selectedCustomer] : [],
-          objective: "Conectar, descubrir necesidad y proponer siguiente paso con cita o seguimiento.",
-        }),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "No se pudo generar el guion.");
-      setScriptDraft({
-        opening: data.script?.opening || "",
-        discovery: data.script?.discovery || "",
-        objectionHandling: data.script?.objectionHandling || "",
-        closing: data.script?.closing || "",
-        nextSteps: data.script?.nextSteps || "",
-      });
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Error generando guion.");
-    }
-  };
-
-  const sendWhatsApp = async () => {
-    try {
-      const res = await fetch("/api/messages/whatsapp/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: waTo,
-          text: waText,
-          entityType: "contact",
-          entityId: selectedCustomer?.id || waTo,
-        }),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "No se pudo enviar WhatsApp.");
-      setNotice("WhatsApp enviado y registrado en CRM.");
-      setWaText("");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Error enviando WhatsApp.");
-    }
-  };
-
-  const sendTelegram = async () => {
-    try {
-      const res = await fetch("/api/messages/telegram/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chatId: tgChatId,
-          text: tgText,
-          entityType: "contact",
-          entityId: selectedCustomer?.id || tgChatId,
-        }),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "No se pudo enviar Telegram.");
-      setNotice("Telegram enviado y registrado en CRM.");
-      setTgText("");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Error enviando Telegram.");
-    }
-  };
-
-  const startPersonalPhoneLinkCall = async () => {
+  async function startOutboundCall() {
     const to = dialNumber.trim();
     if (!to) return;
-    try {
-      window.open(`tel:${encodeURIComponent(to)}`, "_self");
-      await fetch("/api/telephony/personal-line/attempt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to,
+    const res = await fetch("/api/telephony/call/outbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to,
+        customerRef: {
+          phone: to,
           crmEntityType: "contact",
-          crmEntityId: selectedCustomer && typeof selectedCustomer.id === "string" ? selectedCustomer.id : "",
-        }),
-      });
-      setNotice("Llamada iniciada por linea personal (Phone Link) y registrada en CRM.");
-      await loadInbox();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "No se pudo iniciar la llamada personal.");
-    }
-  };
-
-  const loadInbox = async () => {
-    try {
-      const res = await fetch("/api/inbox/list", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "No se pudo cargar bandeja.");
-      const items = Array.isArray(data.items) ? data.items : [];
-      setInboxItems(items);
-      if (!selectedConversationId && items[0]?.id) setSelectedConversationId(items[0].id);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Error cargando bandeja.");
-    }
-  };
-
-  const assignConversation = async (conversationId: string, assignedTo: string) => {
-    const res = await fetch("/api/inbox/assign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId, assignedTo }),
+          crmEntityId: selectedCustomer?.id || "",
+        },
+      }),
     });
-    const data = await readJsonResponse(res);
-    if (!res.ok) throw new Error(data.error || "No se pudo asignar conversacion.");
-    await loadInbox();
-  };
+    const data = await readJson(res);
+    if (!res.ok) { setCallStatus("error"); setNotice(data.error || "No se pudo llamar."); return; }
+    twilioCallSidRef.current = String(data.callSid || "");
+    setCallStatus("in-call");
+  }
 
-  const sendConversationReply = async (conversationId: string) => {
-    const row = inboxItems.find((item) => item.id === conversationId);
-    if (!row || !conversationReply.trim()) return;
-    const res = await fetch(`/api/inbox/${conversationId}/messages`, {
+  async function hangupCall() {
+    const callSid = twilioCallSidRef.current;
+    if (!callSid) return;
+    await fetch("/api/telephony/call/hangup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid }) });
+    setCallStatus("ended");
+    twilioCallSidRef.current = "";
+  }
+
+  async function sendWhatsApp() {
+    const res = await fetch("/api/messages/whatsapp/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: conversationReply,
-        channel: row.lastChannel,
-        direction: "outbound",
+        to: waTo,
+        text: waText,
+        customerRef: { phone: waTo, crmEntityType: "contact", crmEntityId: selectedCustomer?.id || "" },
       }),
     });
-    const data = await readJsonResponse(res);
-    if (!res.ok) throw new Error(data.error || "No se pudo enviar mensaje.");
-    setConversationReply("");
-    await loadInbox();
-  };
+    const data = await readJson(res);
+    setNotice(res.ok ? "WhatsApp enviado." : (data.error || "No se pudo enviar WhatsApp."));
+  }
 
-  const wrapUpConversation = async (conversationId: string) => {
-    const res = await fetch(`/api/inbox/${conversationId}/wrapup`, {
+  async function sendTelegram() {
+    const res = await fetch("/api/messages/telegram/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        outcome: wrapOutcome,
-        reason: wrapReason,
-        notes: wrapNotes,
-        followUpAt: wrapFollowUpAt || null,
+        chatId: tgChatId,
+        text: tgText,
+        customerRef: { chatId: tgChatId, crmEntityType: "contact", crmEntityId: selectedCustomer?.id || "" },
       }),
     });
-    const data = await readJsonResponse(res);
-    if (!res.ok) throw new Error(data.error || "No se pudo cerrar conversacion.");
-    setWrapOutcome("");
-    setWrapReason("");
-    setWrapNotes("");
-    setWrapFollowUpAt("");
-    await loadInbox();
-  };
+    const data = await readJson(res);
+    setNotice(res.ok ? "Telegram enviado." : (data.error || "No se pudo enviar Telegram."));
+  }
 
-  const getDidAvatarSource = () => settings.providers.did.agent || settings.providers.did.avatar || didDefaultAvatar;
-
-  const updateDidDebug = (patch: Partial<DidDebug>) => {
-    setDidDebug((current) => ({ ...current, ...patch }));
-  };
-
-  const sendDidSpeech = async (text: string) => {
-    if (settings.activeAvatarProvider !== "did" || didStatus !== "connected" || !didStreamId || !didSessionId) {
-      updateDidDebug({
-        lastSpeech: "bloqueado: D-ID no conectado",
-        error: "No hay stream/session activos para hablar.",
-      });
-      return false;
-    }
-    updateDidDebug({
-      lastSpeech: `enviando texto (${text.length} chars)`,
-      error: "",
-    });
-    setVoiceSource("openai");
-    const didRes = await fetch("/api/did/speak", {
+  async function generateScript() {
+    const res = await fetch("/api/script/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        streamId: didStreamId,
-        sessionId: didSessionId,
-        text,
+        customer: selectedCustomer || { phone: dialNumber },
+        manualNotes: wrapNotes,
       }),
     });
-    const didData = await readJsonResponse(didRes);
-    if (!didRes.ok) throw new Error(didData.detail || didData.error || "D-ID no pudo hablar.");
-    updateDidDebug({ lastSpeech: "D-ID acepto el texto para hablar", error: "" });
-    return true;
-  };
-
-  const speak = (text: string) => {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "es-MX";
-    utterance.rate = 0.96;
-    window.speechSynthesis.speak(utterance);
-  };
-
-  const sendMessage = async (event?: FormEvent) => {
-    event?.preventDefault();
-    const text = input.trim();
-    if (!text) return;
-    setInput("");
-    setMessages((current) => [...current, { id: Date.now(), role: "user", text }]);
-
-    if (openAiDataChannelRef.current?.readyState === "open") {
-      openAiDataChannelRef.current.send(
-        JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text }],
-          },
-        }),
-      );
-      openAiDataChannelRef.current.send(JSON.stringify({ type: "response.create" }));
-      return;
-    }
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          company: settings.company,
-          provider: settings.activeProvider,
-          model: settings.providers[settings.activeProvider].model,
-          strictKnowledge: settings.strictKnowledge,
-        }),
-      });
-      const data = await readJsonResponse(res);
-      if (!res.ok) throw new Error(data.detail || data.error || "OpenAI no respondio.");
-      const answer = data.answer || "Sin respuesta.";
-      setMessages((current) => [...current, { id: Date.now() + 1, role: "assistant", text: answer }]);
-      
-      if (settings.activeAvatarProvider === "did" && didStatus === "connected" && didStreamId && didSessionId) {
-        void sendDidSpeech(answer)
-          .catch((didError) => {
-            setVoiceSource("none");
-            setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
-          });
-      } else {
-        setVoiceSource("browser");
-        speak(answer);
-      }
-    } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          role: "system",
-          text: error instanceof Error ? error.message : "No hubo respuesta de OpenAI. Revisa llave, modelo y backend.",
-        },
-      ]);
-    }
-  };
-
-  const uploadKnowledge = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []);
-    const payload = await Promise.all(
-      files.map(async (file) => ({
-        name: file.name,
-        type: file.name.split(".").pop()?.toUpperCase() || "DOC",
-        content: await file.text().catch(() => ""),
-      })),
-    );
-    const res = await fetch("/api/knowledge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ files: payload }),
+    const data = await readJson(res);
+    if (!res.ok) { setNotice(data.error || "No se pudo generar guion."); return; }
+    setScriptDraft({
+      opening: data.script?.opening || "",
+      discovery: data.script?.discovery || "",
+      objectionHandling: data.script?.objectionHandling || "",
+      closing: data.script?.closing || "",
+      nextSteps: data.script?.nextSteps || "",
     });
-    const data = await res.json();
-    if (Array.isArray(data.items)) setKnowledge(data.items);
-  };
-
-  const deleteKnowledge = async (id: number) => {
-    const res = await fetch(`/api/knowledge/${id}`, { method: "DELETE" });
-    const data = await res.json();
-    if (Array.isArray(data.items)) setKnowledge(data.items);
-  };
-
-  const saveServerConfig = async () => {
-    setNotice("");
-    const res = await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settings),
-    });
-    setNotice(res.ok ? "Configuracion guardada en navegador y backend local." : "No se pudo guardar en backend.");
-  };
-
-  const connectLiveKit = async () => {
-    if (liveKitStatus === "connected") {
-      roomRef.current?.disconnect();
-      roomRef.current = null;
-      setLiveKitStatus("disconnected");
-      setRemoteParticipants(0);
-      return;
-    }
-
-    setLiveKitStatus("connecting");
-    setNotice("");
-    try {
-      await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
-      });
-      const res = await fetch("/api/livekit/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantName: `${settings.company} alumno` }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || data.hint || "LiveKit no configurado.");
-
-      const room = new Room({ adaptiveStream: true, dynacast: true });
-      room.on("disconnected", () => {
-        setLiveKitStatus("disconnected");
-        setRemoteParticipants(0);
-      });
-      room.on("participantConnected", () => setRemoteParticipants(room.remoteParticipants.size));
-      room.on("participantDisconnected", () => setRemoteParticipants(room.remoteParticipants.size));
-      await room.connect(data.serverUrl, data.participantToken);
-      const audioTrack = await createLocalAudioTrack();
-      await room.localParticipant.publishTrack(audioTrack);
-      roomRef.current = room;
-      setLiveKitStatus("connected");
-      setRemoteParticipants(room.remoteParticipants.size);
-      setVoiceSource(room.remoteParticipants.size > 0 ? "livekit-agent" : "none");
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now(),
-          role: "system",
-          text:
-            `LiveKit conectado a sala ${data.roomName}. ` +
-            "La sala WebRTC ya esta conectada; para audio de vuelta por LiveKit falta levantar un agente LiveKit en esa sala.",
-        },
-      ]);
-    } catch (error) {
-      setLiveKitStatus("error");
-      setNotice(error instanceof Error ? error.message : "Error conectando LiveKit.");
-    }
-  };
-
-  const connectOpenAiRealtime = async () => {
-    if (openAiRealtimeStatus === "connected") {
-      openAiDataChannelRef.current?.close();
-      openAiPeerRef.current?.close();
-      openAiPeerRef.current = null;
-      openAiDataChannelRef.current = null;
-      setOpenAiRealtimeStatus("disconnected");
-      setVoiceSource("none");
-      return;
-    }
-
-    setNotice("");
-    setOpenAiRealtimeStatus("connecting");
-    try {
-      await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
-      });
-
-      const peer = new RTCPeerConnection();
-      const audio = new Audio();
-      audio.autoplay = true;
-      peer.ontrack = (event) => {
-        audio.srcObject = event.streams[0];
-        audio.muted = settings.activeAvatarProvider === "did" && didStatus === "connected";
-        void audio.play().catch(() => undefined);
-      };
-
-      const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-      peer.addTrack(media.getAudioTracks()[0]);
-
-      const dc = peer.createDataChannel("oai-events");
-      dc.onopen = () => {
-        setOpenAiRealtimeStatus("connected");
-        setVoiceSource("openai");
-        dc.send(
-          JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "Saluda brevemente y confirma que estas listo para atender la llamada." }],
-            },
-          }),
-        );
-        dc.send(JSON.stringify({ type: "response.create" }));
-      };
-      dc.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === "response.output_text.done" && data.text) {
-            setMessages((current) => [...current, { id: Date.now(), role: "assistant", text: data.text }]);
-            void sendDidSpeech(data.text).catch((didError) => {
-              setVoiceSource("none");
-              setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
-            });
-          }
-          if (data.type === "response.audio_transcript.done" && data.transcript) {
-            setMessages((current) => [...current, { id: Date.now(), role: "assistant", text: data.transcript }]);
-            void sendDidSpeech(data.transcript).catch((didError) => {
-              setVoiceSource("none");
-              setNotice(didError instanceof Error ? didError.message : "D-ID no pudo hablar.");
-            });
-          }
-          if (data.type === "error") {
-            setNotice(data.error?.message || "OpenAI Realtime devolvio error.");
-          }
-        } catch {
-          // OpenAI events are best-effort UI telemetry here.
-        }
-      };
-
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-
-      const response = await fetch("/api/openai/realtime/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/sdp" },
-        body: offer.sdp || "",
-      });
-      const answerSdp = await response.text();
-      if (!response.ok) throw new Error(answerSdp);
-
-      await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
-      openAiPeerRef.current = peer;
-      openAiDataChannelRef.current = dc;
-      openAiAudioRef.current = audio;
-    } catch (error) {
-      setOpenAiRealtimeStatus("error");
-      setNotice(error instanceof Error ? error.message : "No se pudo conectar OpenAI Realtime.");
-    }
-  };
-
-  const connectDidStream = async () => {
-    if (didStatus === "connected") {
-      if (didPeerRef.current) {
-        didPeerRef.current.close();
-        didPeerRef.current = null;
-      }
-      updateDidDebug({ ...initialDidDebug, lastStep: "desconectando D-ID" });
-      if (didStreamId && didSessionId) {
-        try {
-          await fetch(`/api/did/stream/${didStreamId}`, {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: didSessionId })
-          });
-        } catch { /* noop */ }
-      }
-      setDidStatus("disconnected");
-      setDidStreamId("");
-      setDidSessionId("");
-      updateDidDebug({ ...initialDidDebug, lastStep: "D-ID desconectado" });
-      return;
-    }
-
-    setNotice("");
-    setDidStatus("connecting");
-    updateDidDebug({
-      ...initialDidDebug,
-      lastStep: "solicitando stream a D-ID",
-      video: "esperando stream",
-    });
-    try {
-      const resStream = await fetch("/api/did/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source_url: getDidAvatarSource()
-        })
-      });
-      const streamData = await readJsonResponse(resStream);
-      if (!resStream.ok) throw new Error(streamData.detail || streamData.error || "Error al crear flujo en D-ID");
-
-      const { id: streamId, session_id: sessionId, offer, ice_servers } = streamData;
-      setDidStreamId(streamId);
-      setDidSessionId(sessionId);
-      updateDidDebug({
-        lastStep: "stream creado; preparando WebRTC",
-        streamId: streamId ? `${streamId}`.slice(0, 10) : "",
-        sessionId: sessionId ? `${sessionId}`.slice(0, 10) : "",
-      });
-
-      const peer = new RTCPeerConnection({
-        iceServers: ice_servers
-      });
-
-      peer.ontrack = (event) => {
-        if (didVideoRef.current && event.streams && event.streams[0]) {
-          didVideoRef.current.srcObject = event.streams[0];
-          didVideoRef.current.muted = false;
-          didVideoRef.current.volume = 1;
-          didVideoRef.current.play().catch(() => undefined);
-          setDidStatus("connected");
-          updateDidDebug({
-            lastStep: "video recibido desde D-ID",
-            video: "stream recibido",
-            connection: peer.connectionState,
-            ice: peer.iceConnectionState,
-            error: "",
-          });
-        }
-      };
-
-      peer.onconnectionstatechange = () => {
-        updateDidDebug({ connection: peer.connectionState });
-        if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
-          updateDidDebug({ error: `WebRTC ${peer.connectionState}` });
-        }
-      };
-
-      peer.oniceconnectionstatechange = () => {
-        updateDidDebug({ ice: peer.iceConnectionState, lastStep: `ICE ${peer.iceConnectionState}` });
-        if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
-          setTimeout(() => {
-            void sendDidSpeech("Hola, estoy conectado y listo.").catch((didError) => {
-              updateDidDebug({
-                lastSpeech: "fallo saludo inicial",
-                error: didError instanceof Error ? didError.message : "D-ID no pudo hablar.",
-              });
-            });
-          }, 500);
-        }
-      };
-
-      peer.onicecandidate = async (event) => {
-        if (event.candidate) {
-          updateDidDebug({ lastStep: "enviando candidato ICE" });
-          try {
-            await fetch("/api/did/ice", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                streamId,
-                sessionId,
-                candidate: {
-                  candidate: event.candidate.candidate,
-                  sdpMid: event.candidate.sdpMid,
-                  sdpMLineIndex: event.candidate.sdpMLineIndex
-                }
-              })
-            });
-          } catch (iceError) {
-            updateDidDebug({
-              error: iceError instanceof Error ? iceError.message : "Fallo enviando ICE",
-            });
-          }
-        }
-      };
-
-      updateDidDebug({ lastStep: "aplicando offer remota" });
-      await peer.setRemoteDescription(new RTCSessionDescription(offer));
-
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-
-      updateDidDebug({ lastStep: "enviando SDP answer" });
-      const resSdp = await fetch("/api/did/sdp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          streamId,
-          sessionId,
-          answer: {
-            type: "answer",
-            sdp: answer.sdp
-          }
-        })
-      });
-      if (!resSdp.ok) {
-        const sdpError = await readJsonResponse(resSdp);
-        throw new Error(sdpError.error || sdpError.detail || "Error al enviar SDP");
-      }
-
-      didPeerRef.current = peer;
-      updateDidDebug({ lastStep: "SDP aceptado; esperando video" });
-    } catch (error) {
-      setDidStatus("error");
-      const message = error instanceof Error ? error.message : "Error al conectar D-ID WebRTC.";
-      setNotice(message);
-      updateDidDebug({ lastStep: "fallo conexion D-ID", error: message });
-    }
-  };
- 
-  const selectAvatarChoice = (choice: (typeof avatarChoices)[number]) => {
-    if (choice.id === "rpm-create" || choice.id === "upload-3d") {
-      setAvatarCreatorOpen(true);
-      setSettings((current) => ({ ...current, activeAvatarProvider: "readyplayerme" }));
-      return;
-    }
-    setSettings((current) => ({
-      ...current,
-      activeAvatarProvider: choice.provider,
-      providers: {
-        ...current.providers,
-        [choice.provider]: {
-          ...current.providers[choice.provider],
-          enabled: true,
-          avatar: choice.provider === "did" ? current.providers[choice.provider].avatar : choice.value || current.providers[choice.provider].avatar,
-          agent: choice.provider === "did" ? choice.value || current.providers.did.agent : current.providers[choice.provider].agent,
-        },
-      },
-    }));
-  };
+  }
 
   return (
-    <main className="product-shell">
-      <aside className="rail">
-        <div className="brand">
-          <div className="brand-icon">R</div>
-          <div>
-            <strong>ROKA</strong>
-            <span>Telemarketing Center</span>
-          </div>
-        </div>
-        <nav>
-          {[
+    <main className="app-shell">
+      <aside className="sidebar">
+        <div className="brand"><div className="brand-mark">R</div><div><strong>ROKA</strong><span>Telemarketing Center</span></div></div>
+        <nav className="nav-list">
+          {([
             ["conversations", MessageSquare, "Conversaciones"],
             ["calls", Phone, "Llamadas"],
             ["powerDialer", Radio, "Power Dialer"],
-            ["contacts", BookOpen, "Contactos"],
-            ["messages", MessageSquare, "Mensajeria"],
-            ["scripts", MonitorPlay, "Guiones IA"],
-            ["evaluations", Activity, "Evaluaciones"],
-            ["providers", PlugZap, "Canales"],
-            ["settings", Settings, "Configuracion"],
-          ].map(([id, Icon, label]) => (
-            <button className={section === id ? "rail-link active" : "rail-link"} key={id as string} onClick={() => setSection(id as Section)} type="button">
-              <Icon size={18} />
-              <span>{label as string}</span>
+            ["contacts", UserCircle2, "Contactos"],
+            ["messages", Send, "Mensajería"],
+            ["scripts", Sparkles, "Guiones IA"],
+            ["evaluations", Building2, "Evaluaciones"],
+            ["providers", Settings, "Canales"],
+            ["settings", Settings, "Configuración"],
+          ] as Array<[Section, ComponentType<{ size?: number }>, string]>).map(([id, Icon, label]) => (
+            <button key={id} className={section === id ? "nav-item active" : "nav-item"} type="button" onClick={() => setSection(id as Section)}>
+              <Icon size={18} /><span>{label}</span>
             </button>
           ))}
         </nav>
-        <div className="rail-status">
-          <span className={health?.ok ? "dot ok" : "dot"} />
-          <div>
-            <strong>{health?.ok ? "Backend activo" : "Backend offline"}</strong>
-            <span>{configuredCount} proveedores configurados</span>
-          </div>
-        </div>
       </aside>
 
-      <section className="main-area">
-        <header className="app-header">
-          <div>
-            <p>Centro omnicanal</p>
-            <h1>{settings.company}</h1>
-          </div>
+      <section className="workspace">
+        <header className="topbar">
+          <h1>ROKA</h1>
           <div className="header-actions">
-            <button className="secondary-action" onClick={firebaseUser ? signOutGoogle : signInGoogle} type="button">
-              <Building2 size={18} />
-              {firebaseUser ? "Salir Google" : "Entrar con Google"}
-            </button>
-            <button className="secondary-action" onClick={refreshBackend} type="button">
-              <ServerCog size={18} />
-              Backend
-            </button>
-            <button className="primary-action" onClick={() => setSection("providers")} type="button">
-              <KeyRound size={18} />
-              Configurar canales
-            </button>
+            {!authUser ? <button className="secondary-action" onClick={() => void signInGoogle()} disabled={authBusy}>Entrar con Google</button> : <button className="secondary-action" onClick={() => void signOutGoogle()}>Salir ({authUser.email})</button>}
+            <button className="primary-action" onClick={() => void saveConfig()}><Save size={16} />Guardar</button>
           </div>
         </header>
 
-        {section === "settings" && (
-          <SettingsView
-            activeProvider={activeProvider}
-            health={health}
-            notice={notice}
-            settings={settings}
-            setSettings={setSettings}
-            updateProvider={updateProvider}
-            onSave={saveServerConfig}
-          />
-        )}
+        {notice && <div className="notice">{notice}</div>}
 
-        {section === "conversations" && (
-          <ConversationsView
-            items={inboxItems}
-            selectedConversationId={selectedConversationId}
-            setSelectedConversationId={setSelectedConversationId}
-            reply={conversationReply}
-            setReply={setConversationReply}
-            wrapOutcome={wrapOutcome}
-            wrapReason={wrapReason}
-            wrapNotes={wrapNotes}
-            wrapFollowUpAt={wrapFollowUpAt}
-            setWrapOutcome={setWrapOutcome}
-            setWrapReason={setWrapReason}
-            setWrapNotes={setWrapNotes}
-            setWrapFollowUpAt={setWrapFollowUpAt}
-            onAssign={assignConversation}
-            onReply={sendConversationReply}
-            onWrapUp={wrapUpConversation}
-            onRefresh={loadInbox}
-          />
+        {section === "contacts" && (
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>CRM</p><h2>Contactos y leads</h2></div><button className="secondary-action" onClick={() => void loadContacts(contactQuery)}>Buscar</button></div>
+            <div className="form-grid"><label>Buscar por nombre, empresa, email o teléfono<input value={contactQuery} onChange={(e) => setContactQuery(e.target.value)} /></label></div>
+            <div className="data-table">
+              {contacts.map((item) => <article key={item.id} style={{ cursor: "pointer" }} onClick={() => { setSelectedCustomer(item); setDialNumber(item.phone || ""); setSection("calls"); }}><UserCircle2 size={16} /><div><strong>{item.name || "Sin nombre"}</strong><span>{item.account || item.company || item.email || item.phone || item.id}</span></div><span className="pill">{item.collection || "crm"}</span></article>)}
+            </div>
+          </section>
         )}
 
         {section === "calls" && (
-          <CallsDeskView
-            callStatus={callStatus}
-            dialNumber={dialNumber}
-            selectedCustomer={selectedCustomer}
-            setDialNumber={setDialNumber}
-            onConnectTwilio={connectTwilioDevice}
-            onDial={startOutboundCall}
-            onPersonalDial={startPersonalPhoneLinkCall}
-            onHangup={hangupCall}
-            onSearchCustomer={searchCustomerByPhone}
-            onGenerateScript={generateScript}
-            scriptDraft={scriptDraft}
-            setScriptDraft={setScriptDraft}
-          />
-        )}
-
-        {section === "contacts" && (
-          <ContactsView
-            contacts={crmContacts}
-            leads={crmLeads}
-            onRefresh={loadCrmContacts}
-            onSelect={(row) => {
-              setSelectedCustomer(row);
-              setDialNumber(String(row.phone || ""));
-              setSection("calls");
-            }}
-          />
+          <div className="ops-grid">
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Telefonía</p><h2>Llamadas</h2></div></div>
+              <div className="form-grid compact"><label>Número<input value={dialNumber} onChange={(e) => setDialNumber(e.target.value)} placeholder="+52..." /></label></div>
+              <div className="header-actions">
+                <button className="secondary-action" onClick={() => void connectTwilioDevice()}>Conectar</button>
+                <button className="secondary-action" onClick={() => void searchCustomer()}>Buscar cliente</button>
+                <button className="primary-action" onClick={() => void startOutboundCall()}>Llamar</button>
+                <button className="danger-action" onClick={() => void hangupCall()}>Colgar</button>
+              </div>
+              <p className="muted">Estado: {callStatus}</p>
+            </section>
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Cliente</p><h2>Contexto CRM</h2></div></div>
+              <pre className="muted">{selectedCustomer ? JSON.stringify(selectedCustomer, null, 2) : "Sin cliente seleccionado."}</pre>
+            </section>
+          </div>
         )}
 
         {section === "messages" && (
-          <MessagingView
-            waTo={waTo}
-            waText={waText}
-            tgChatId={tgChatId}
-            tgText={tgText}
-            setWaTo={setWaTo}
-            setWaText={setWaText}
-            setTgChatId={setTgChatId}
-            setTgText={setTgText}
-            onSendWhatsApp={sendWhatsApp}
-            onSendTelegram={sendTelegram}
-          />
+          <div className="ops-grid">
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Canal</p><h2>WhatsApp</h2></div><button className="primary-action" onClick={() => void sendWhatsApp()}>Enviar</button></div>
+              <div className="assistant-editor"><label>Número destino<input value={waTo} onChange={(e) => setWaTo(e.target.value)} /></label><label>Mensaje<textarea value={waText} onChange={(e) => setWaText(e.target.value)} /></label></div>
+            </section>
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Canal</p><h2>Telegram</h2></div><button className="primary-action" onClick={() => void sendTelegram()}>Enviar</button></div>
+              <div className="assistant-editor"><label>Chat ID<input value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} /></label><label>Mensaje<textarea value={tgText} onChange={(e) => setTgText(e.target.value)} /></label></div>
+            </section>
+          </div>
         )}
 
         {section === "scripts" && (
-          <ScriptsView scriptDraft={scriptDraft} setScriptDraft={setScriptDraft} onGenerate={generateScript} />
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>IA Comercial</p><h2>Guión por cliente</h2></div><button className="primary-action" onClick={() => void generateScript()}>Generar guión</button></div>
+            <div className="assistant-editor">
+              <label>Apertura<textarea value={scriptDraft.opening} onChange={(e) => setScriptDraft((s) => ({ ...s, opening: e.target.value }))} /></label>
+              <label>Descubrimiento<textarea value={scriptDraft.discovery} onChange={(e) => setScriptDraft((s) => ({ ...s, discovery: e.target.value }))} /></label>
+              <label>Objeciones<textarea value={scriptDraft.objectionHandling} onChange={(e) => setScriptDraft((s) => ({ ...s, objectionHandling: e.target.value }))} /></label>
+              <label>Cierre<textarea value={scriptDraft.closing} onChange={(e) => setScriptDraft((s) => ({ ...s, closing: e.target.value }))} /></label>
+              <label>Siguientes pasos<textarea value={scriptDraft.nextSteps} onChange={(e) => setScriptDraft((s) => ({ ...s, nextSteps: e.target.value }))} /></label>
+            </div>
+          </section>
         )}
 
-        {section === "powerDialer" && (
-          <PowerDialerView
-            dialNumber={dialNumber}
-            setDialNumber={setDialNumber}
-            onSearchCustomer={searchCustomerByPhone}
-            onDial={startOutboundCall}
-            onHangup={hangupCall}
-            callStatus={callStatus}
-          />
-        )}
-
-        {section === "evaluations" && (
-          <EvaluationsView items={inboxItems} />
+        {section === "conversations" && (
+          <div className="ops-grid">
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Bandeja</p><h2>Conversaciones</h2></div><button className="secondary-action" onClick={() => void loadInbox()}>Actualizar</button></div>
+              <div className="data-table">
+                {inboxItems.map((item) => <article key={item.id} onClick={() => setSelectedConvId(item.id)} style={{ cursor: "pointer" }}><MessageSquare size={16} /><div><strong>{item.customerKey}</strong><span>{item.lastChannel} · {item.status}</span></div><button className="secondary-action" onClick={(e) => { e.stopPropagation(); void assignConversation(item.id); }}>Asignar</button></article>)}
+              </div>
+            </section>
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Detalle</p><h2>{selectedConversation?.customerKey || "Selecciona conversación"}</h2></div></div>
+              <div className="message-list">{(selectedConversation?.events || []).map((m) => <article key={m.id} className={`msg ${m.direction === "outbound" ? "user" : "assistant"}`}><strong>{m.channel}</strong><p>{m.text}</p></article>)}</div>
+              <form className="composer" onSubmit={(e) => { e.preventDefault(); void sendReply(); }}><input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Escribe respuesta..." /><button className="primary-action" type="submit">Enviar</button></form>
+            </section>
+            <section className="ops-panel">
+              <div className="panel-title"><div><p>Wrap-up</p><h2>Cierre obligatorio</h2></div></div>
+              <div className="assistant-editor">
+                <label>Outcome<input value={wrapOutcome} onChange={(e) => setWrapOutcome(e.target.value)} /></label>
+                <label>Reason<input value={wrapReason} onChange={(e) => setWrapReason(e.target.value)} /></label>
+                <label>Notas<textarea value={wrapNotes} onChange={(e) => setWrapNotes(e.target.value)} /></label>
+              </div>
+              <button className="primary-action" onClick={() => void wrapUpConversation()} disabled={!selectedConversation}>Cerrar interacción</button>
+            </section>
+          </div>
         )}
 
         {section === "providers" && (
-          <ProviderView
-            settings={settings}
-            setSettings={setSettings}
-            updateProvider={updateProvider}
-          />
+          <section className="ops-panel wide">
+            <div className="panel-title"><div><p>Canales</p><h2>Twilio + WhatsApp + Telegram + CRM</h2></div></div>
+            <div className="form-grid">
+              <label>Twilio Account SID<input value={settings.providers.twilio.accountSid || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, accountSid: e.target.value } } }))} /></label>
+              <label>Twilio API Key SID<input value={settings.providers.twilio.apiKeySid || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, apiKeySid: e.target.value } } }))} /></label>
+              <label>Twilio API Key Secret<input type="password" value={settings.providers.twilio.apiKeySecret || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, apiKeySecret: e.target.value } } }))} /></label>
+              <label>Twilio TwiML App SID<input value={settings.providers.twilio.twimlAppSid || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, twimlAppSid: e.target.value } } }))} /></label>
+              <label>Número Twilio<input value={settings.providers.twilio.phoneNumber || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, phoneNumber: e.target.value } } }))} /></label>
+              <label>CRM Bridge URL<input value={settings.providers.twilio.crmBridgeUrl || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, crmBridgeUrl: e.target.value } } }))} /></label>
+              <label>CRM Organization ID<input value={settings.providers.twilio.organizationId || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, twilio: { ...s.providers.twilio, organizationId: e.target.value } } }))} /></label>
+              <label>WhatsApp From<input value={settings.providers.whatsapp.from || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, whatsapp: { ...s.providers.whatsapp, from: e.target.value } } }))} placeholder="whatsapp:+14155238886" /></label>
+              <label>Telegram Bot Token<input type="password" value={settings.providers.telegram.botToken || ""} onChange={(e) => setSettings((s) => ({ ...s, providers: { ...s.providers, telegram: { ...s.providers.telegram, botToken: e.target.value } } }))} /></label>
+            </div>
+          </section>
+        )}
+
+        {(section === "settings" || section === "powerDialer" || section === "evaluations") && (
+          <section className="ops-panel"><h2>Este módulo está en transición</h2><p className="muted">Ya no contiene funciones de capacitación; lo terminamos en el siguiente ajuste.</p></section>
         )}
       </section>
-
-      {avatarCreatorOpen && (
-        <AvatarCreatorModal
-          draft={avatarUrlDraft}
-          onChangeDraft={setAvatarUrlDraft}
-          onClose={() => setAvatarCreatorOpen(false)}
-          onSave={() => saveReadyPlayerAvatar(avatarUrlDraft)}
-          onUpload={uploadAvatarModel}
-        />
-      )}
     </main>
-  );
-}
-
-function SettingsView({
-  activeProvider,
-  health,
-  notice,
-  settings,
-  setSettings,
-  updateProvider,
-  onSave,
-}: {
-  activeProvider: (typeof providerCatalog)[number];
-  health: BackendHealth | null;
-  notice: string;
-  settings: AppSettings;
-  setSettings: (settings: AppSettings | ((current: AppSettings) => AppSettings)) => void;
-  updateProvider: (id: ProviderId, patch: Partial<ProviderConfig>) => void;
-  onSave: () => void;
-}) {
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel wide">
-        <div className="panel-title">
-          <div>
-            <p>Configuracion obligatoria</p>
-            <h2>Empresa, proveedor, modelo y llaves</h2>
-          </div>
-          <button className="primary-action" onClick={onSave} type="button">
-            <Save size={18} />
-            Guardar
-          </button>
-        </div>
-
-        <div className="form-grid">
-          <label>
-            Empresa
-            <input value={settings.company} onChange={(event) => setSettings((current) => ({ ...current, company: event.target.value }))} />
-          </label>
-          <label>
-            Asistente comercial
-            <input value={settings.assistantName} onChange={(event) => setSettings((current) => ({ ...current, assistantName: event.target.value }))} />
-          </label>
-          <label>
-            IA principal
-            <select value={settings.activeProvider} onChange={(event) => setSettings((current) => ({ ...current, activeProvider: event.target.value as ProviderId }))}>
-              {providerCatalog.filter((provider) => provider.kind.includes("IA") || provider.id === "pipecat").map((provider) => (
-                <option key={provider.id} value={provider.id}>{provider.name}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        <div className="config-section">
-          <h3>Infraestructura realtime</h3>
-          <ProviderCredentials id="livekit" settings={settings} updateProvider={updateProvider} />
-          <ProviderCredentials id="pipecat" settings={settings} updateProvider={updateProvider} />
-          <ProviderCredentials id="twilio" settings={settings} updateProvider={updateProvider} />
-        </div>
-
-        <div className="config-section">
-          <h3>Empresas de IA y voz</h3>
-          <ProviderCredentials id="openai" settings={settings} updateProvider={updateProvider} />
-          <ProviderCredentials id="gemini" settings={settings} updateProvider={updateProvider} />
-          <ProviderCredentials id="elevenlabs" settings={settings} updateProvider={updateProvider} />
-        </div>
-
-        {notice && <div className="notice">{notice}</div>}
-      </section>
-
-      <section className="ops-panel">
-        <div className="provider-summary">
-          <div className="summary-icon"><Bot size={26} /></div>
-          <p>{activeProvider.kind}</p>
-          <h2>{activeProvider.name}</h2>
-          <span>{activeProvider.use}</span>
-        </div>
-        <div className="status-list">
-          <Status label="Backend" ok={Boolean(health?.ok)} />
-          <Status label="LiveKit" ok={Boolean(settings.providers.livekit.url && settings.providers.livekit.apiKey && settings.providers.livekit.apiSecret)} />
-          <Status label="IA activa" ok={Boolean(settings.providers[settings.activeProvider].apiKey || settings.activeProvider === "pipecat")} />
-          <Status label="Twilio" ok={Boolean(settings.providers.twilio.accountSid && settings.providers.twilio.apiKeySid)} />
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ProviderCredentials({
-  id,
-  settings,
-  updateProvider,
-}: {
-  id: ProviderId;
-  settings: AppSettings;
-  updateProvider: (id: ProviderId, patch: Partial<ProviderConfig>) => void;
-}) {
-  const provider = providerCatalog.find((item) => item.id === id)!;
-  const config = settings.providers[id];
-  return (
-    <div className="credential-block">
-      <div className="credential-head">
-        <div>
-          <p>{provider.kind}</p>
-          <h3>{provider.name}</h3>
-        </div>
-        <label className="switch">
-          <input checked={config.enabled} type="checkbox" onChange={(event) => updateProvider(id, { enabled: event.target.checked })} />
-          Activo
-        </label>
-      </div>
-      <div className="form-grid compact">
-        {(id === "livekit" || id === "pipecat") && (
-          <label>
-            URL / endpoint
-            <input value={config.url || ""} placeholder={id === "livekit" ? "wss://xxx.livekit.cloud" : "http://localhost:7860"} onChange={(event) => updateProvider(id, { url: event.target.value })} />
-          </label>
-        )}
-        {id === "twilio" && (
-          <>
-            <label>
-              Account SID
-              <input value={config.accountSid || ""} onChange={(event) => updateProvider(id, { accountSid: event.target.value })} />
-            </label>
-            <label>
-              API Key SID
-              <input value={config.apiKeySid || ""} onChange={(event) => updateProvider(id, { apiKeySid: event.target.value })} />
-            </label>
-            <label>
-              API Key Secret
-              <input type="password" value={config.apiKeySecret || ""} onChange={(event) => updateProvider(id, { apiKeySecret: event.target.value })} />
-            </label>
-            <label>
-              TwiML App SID
-              <input value={config.twimlAppSid || ""} onChange={(event) => updateProvider(id, { twimlAppSid: event.target.value })} />
-            </label>
-            <label>
-              Número Twilio
-              <input value={config.phoneNumber || ""} placeholder="+52..." onChange={(event) => updateProvider(id, { phoneNumber: event.target.value })} />
-            </label>
-            <label>
-              Webhook token
-              <input type="password" value={config.webhookAuthToken || ""} onChange={(event) => updateProvider(id, { webhookAuthToken: event.target.value })} />
-            </label>
-            <label>
-              CRM Bridge URL
-              <input value={config.crmBridgeUrl || ""} onChange={(event) => updateProvider(id, { crmBridgeUrl: event.target.value })} />
-            </label>
-            <label>
-              CRM Bridge token
-              <input type="password" value={config.bridgeToken || ""} onChange={(event) => updateProvider(id, { bridgeToken: event.target.value })} />
-            </label>
-            <label>
-              CRM Organization ID
-              <input value={config.organizationId || ""} onChange={(event) => updateProvider(id, { organizationId: event.target.value })} />
-            </label>
-            <label>
-              Allowed origins CSV
-              <input value={config.allowedOrigins || ""} onChange={(event) => updateProvider(id, { allowedOrigins: event.target.value })} />
-            </label>
-          </>
-        )}
-        {id === "whatsapp" && (
-          <>
-            <label>
-              Provider
-              <input value={config.provider || "twilio"} onChange={(event) => updateProvider(id, { provider: event.target.value })} />
-            </label>
-            <label>
-              From
-              <input value={config.from || ""} placeholder="whatsapp:+14155238886" onChange={(event) => updateProvider(id, { from: event.target.value })} />
-            </label>
-          </>
-        )}
-        {id === "telegram" && (
-          <>
-            <label>
-              Bot token
-              <input type="password" value={config.botToken || ""} onChange={(event) => updateProvider(id, { botToken: event.target.value })} />
-            </label>
-            <label>
-              Default chat id
-              <input value={config.defaultChatId || ""} onChange={(event) => updateProvider(id, { defaultChatId: event.target.value })} />
-            </label>
-          </>
-        )}
-        <label>
-          Modelo
-          <input value={config.model} placeholder={provider.defaultModel} onChange={(event) => updateProvider(id, { model: event.target.value })} />
-        </label>
-        <label>
-          API key
-          <input value={config.apiKey} placeholder="Pega la llave del usuario" type="password" onChange={(event) => updateProvider(id, { apiKey: event.target.value })} />
-        </label>
-        {id === "livekit" && (
-          <label>
-            API secret
-            <input value={config.apiSecret || ""} placeholder="LiveKit API secret" type="password" onChange={(event) => updateProvider(id, { apiSecret: event.target.value })} />
-          </label>
-        )}
-        {(id === "elevenlabs") && (
-          <label>
-            Voz
-            <input value={config.voice || ""} placeholder="Voice ID o nombre" onChange={(event) => updateProvider(id, { voice: event.target.value })} />
-          </label>
-        )}
-        {(id === "heygen" || id === "did" || id === "talkinghead" || id === "readyplayerme") && (
-          <label>
-            Avatar / Agent ID
-            <input
-              value={id === "did" ? config.agent || "" : config.avatar || ""}
-              placeholder={id === "talkinghead" || id === "readyplayerme" ? "URL .glb de Ready Player Me" : "ID del avatar/agente"}
-              onChange={(event) => updateProvider(id, id === "did" ? { agent: event.target.value } : { avatar: event.target.value })}
-            />
-          </label>
-        )}
-        {id === "livekit" && (
-          <label>
-            Agent name
-            <input value={config.agentName || ""} placeholder="Opcional" onChange={(event) => updateProvider(id, { agentName: event.target.value })} />
-          </label>
-        )}
-      </div>
-      <div className="key-line">
-        <KeyRound size={15} />
-        <span>{mask(config.apiKey)}</span>
-      </div>
-    </div>
-  );
-}
-
-function SessionView({
-  activeProvider,
-  input,
-  liveKitStatus,
-  messages,
-  notice,
-  onAvatarUrl,
-  openAiRealtimeStatus,
-  onOpenAvatarCreator,
-  remoteParticipants,
-  settings,
-  selectedBuiltInAvatar,
-  onSelectBuiltInAvatar,
-  onSelectAvatar,
-  voiceSource,
-  setInput,
-  onConnectLiveKit,
-  onConnectOpenAiRealtime,
-  onSend,
-  callStatus,
-  dialNumber,
-  selectedCustomer,
-  scriptDraft,
-  setDialNumber,
-  setScriptDraft,
-  onConnectTwilio,
-  onDial,
-  onHangup,
-  onSearchCustomer,
-  onGenerateScript,
-  didStatus,
-  didVideoRef,
-  didPoster,
-  didDebug,
-  onConnectDidStream,
-}: {
-  activeProvider: (typeof providerCatalog)[number];
-  input: string;
-  liveKitStatus: LiveKitStatus;
-  messages: Message[];
-  notice: string;
-  onAvatarUrl: (url: string) => void;
-  openAiRealtimeStatus: RealtimeStatus;
-  onOpenAvatarCreator: () => void;
-  remoteParticipants: number;
-  settings: AppSettings;
-  selectedBuiltInAvatar: string;
-  onSelectBuiltInAvatar: (id: string) => void;
-  onSelectAvatar: (choice: (typeof avatarChoices)[number]) => void;
-  voiceSource: "none" | "browser" | "openai" | "livekit-agent";
-  setInput: (value: string) => void;
-  onConnectLiveKit: () => void;
-  onConnectOpenAiRealtime: () => void;
-  onSend: (event?: FormEvent) => void;
-  callStatus: CallStatus;
-  dialNumber: string;
-  selectedCustomer: Record<string, unknown> | null;
-  scriptDraft: ScriptDraft;
-  setDialNumber: (value: string) => void;
-  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
-  onConnectTwilio: () => void;
-  onDial: () => void;
-  onHangup: () => void;
-  onSearchCustomer: () => void;
-  onGenerateScript: () => void;
-  didStatus: "disconnected" | "connecting" | "connected" | "error";
-  didVideoRef: React.RefObject<HTMLVideoElement | null>;
-  didPoster: string;
-  didDebug: DidDebug;
-  onConnectDidStream: () => void;
-}) {
-  const currentAvatar = builtInAvatars.find((a) => a.id === selectedBuiltInAvatar) || builtInAvatars[0];
-  const activeAvatarValue = getActiveAvatarValue(settings);
-  
-  // If user entered a custom external URL in the advanced section, use it. Otherwise use the built-in 3D model.
-  const isCustomAdvanced = settings.activeAvatarProvider === "readyplayerme" && activeAvatarValue !== "";
-  const activeModelUrl = isCustomAdvanced ? activeAvatarValue : currentAvatar.modelUrl;
-  
-  const isSpeaking = voiceSource !== "none";
-
-  return (
-    <div className="session-grid">
-      <section className="ops-panel session-main">
-        {/* ── Toolbar ── */}
-        <div className="panel-title">
-          <div>
-            <p>Sala de llamadas en vivo</p>
-            <h2>{activeProvider.name} · {settings.providers[settings.activeProvider].model}</h2>
-          </div>
-          <div className="header-actions">
-            {settings.activeAvatarProvider === "did" && (
-              <button className={didStatus === "connected" ? "danger-action" : "primary-action"} onClick={onConnectDidStream} type="button">
-                <Video size={16} />
-                {didStatus === "connected" ? "Desconectar D-ID" : didStatus === "connecting" ? "Conectando…" : "Conectar D-ID"}
-              </button>
-            )}
-            <button className={liveKitStatus === "connected" ? "danger-action" : "secondary-action"} onClick={onConnectLiveKit} type="button">
-              <Radio size={16} />
-              {liveKitStatus === "connected" ? "Desconectar" : liveKitStatus === "connecting" ? "Conectando…" : "LiveKit"}
-            </button>
-            <button className={openAiRealtimeStatus === "connected" ? "danger-action" : "secondary-action"} onClick={onConnectOpenAiRealtime} type="button">
-              <Mic size={16} />
-              {openAiRealtimeStatus === "connected" ? "Desconectar voz" : openAiRealtimeStatus === "connecting" ? "Conectando…" : "Voz IA"}
-            </button>
-            <button className={callStatus === "ready" || callStatus === "in-call" ? "danger-action" : "secondary-action"} onClick={onConnectTwilio} type="button">
-              <Phone size={16} />
-              {callStatus === "ready" || callStatus === "in-call" ? "Softphone activo" : "Conectar telefonía"}
-            </button>
-          </div>
-        </div>
-
-        {notice && <div className="notice danger">{notice}</div>}
-
-        {/* ── Main Content: Avatar (large) + Chat (sidebar) ── */}
-        <div className="session-content">
-          {/* Left: Avatar Stage — THE STAR */}
-          <div className="avatar-stage">
-            {settings.activeAvatarProvider === "did" ? (
-              <video
-                ref={didVideoRef}
-                className="avatar-video"
-                autoPlay
-                playsInline
-                poster={didPoster}
-                style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "12px", background: "#0f172a" }}
-              />
-            ) : (
-              <ModelViewer
-                alt="Avatar 3D interactivo"
-                className={`avatar-model ${isSpeaking ? "speaking-3d" : ""}`}
-                src={activeModelUrl}
-                auto-rotate
-                camera-controls
-              />
-            )}
-            <div>
-              <strong>{settings.activeAvatarProvider === "did" ? "Avatar D-ID Humano Real" : isCustomAdvanced ? "Modelo 3D Personalizado" : currentAvatar.name}</strong>
-              <span>{settings.activeAvatarProvider === "did" ? "Videollamada interactiva en tiempo real" : isCustomAdvanced ? activeModelUrl : currentAvatar.description}</span>
-            </div>
-          </div>
-
-          {/* Right: Chat Panel */}
-          <div className="session-chat-panel">
-            <div className="chat-header">
-              <MessageSquare size={16} />
-              <h3>Chat operativo</h3>
-            </div>
-            <div className="message-list">
-              {messages.map((message) => (
-                <article className={`msg ${message.role}`} key={message.id}>
-                  <strong>{message.role === "assistant" ? "IA" : message.role === "user" ? "Tú" : "Sistema"}</strong>
-                  <p>{message.text}</p>
-                </article>
-              ))}
-            </div>
-            <form className="composer" onSubmit={onSend}>
-              <input value={input} aria-label="Mensaje para el asistente comercial" placeholder="Escribe una instruccion o nota…" onChange={(event) => setInput(event.target.value)} />
-              <button className="primary-action" type="submit">
-                <ChevronRight size={16} />
-              </button>
-            </form>
-          </div>
-        </div>
-
-        {/* ── Runtime Status ── */}
-        <div className="runtime-strip">
-          <span className={liveKitStatus === "connected" ? "runtime-pill ok" : "runtime-pill"}>
-            LiveKit: {liveKitStatus === "connected" ? "conectado" : liveKitStatus}
-          </span>
-          {settings.activeAvatarProvider === "did" && (
-            <span className={didStatus === "connected" ? "runtime-pill ok" : "runtime-pill"}>
-              D-ID: {didStatus === "connected" ? "transmitiendo" : didStatus}
-            </span>
-          )}
-          <span className={openAiRealtimeStatus === "connected" ? "runtime-pill ok" : "runtime-pill"}>
-            Voz IA: {openAiRealtimeStatus === "connected" ? "activa" : openAiRealtimeStatus}
-          </span>
-          <span className={voiceSource !== "none" ? "runtime-pill ok" : "runtime-pill warn"}>
-            Audio: {voiceSourceLabel(voiceSource)}
-          </span>
-        </div>
-
-        <div className="ops-grid">
-          <section className="ops-panel">
-            <div className="panel-title">
-              <div>
-                <p>Central</p>
-                <h2>Llamadas entrantes/salientes</h2>
-              </div>
-            </div>
-            <div className="form-grid compact">
-              <label>
-                Número cliente
-                <input value={dialNumber} placeholder="+52..." onChange={(event) => setDialNumber(event.target.value)} />
-              </label>
-            </div>
-            <div className="header-actions">
-              <button className="secondary-action" onClick={onSearchCustomer} type="button">Buscar cliente</button>
-              <button className="primary-action" onClick={onDial} type="button">Llamar</button>
-              <button className="danger-action" onClick={onHangup} type="button">Colgar</button>
-            </div>
-            <div className="runtime-strip" style={{ marginTop: 10 }}>
-              <span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado llamada: {callStatus}</span>
-            </div>
-          </section>
-          <section className="ops-panel">
-            <div className="panel-title">
-              <div>
-                <p>Cliente</p>
-                <h2>Contexto CRM</h2>
-              </div>
-            </div>
-            <p className="muted">
-              {selectedCustomer ? JSON.stringify(selectedCustomer) : "Sin cliente cargado."}
-            </p>
-          </section>
-        </div>
-
-        <section className="ops-panel">
-          <div className="panel-title">
-            <div>
-              <p>Guion IA</p>
-              <h2>Script dinámico por cliente</h2>
-            </div>
-            <div className="header-actions">
-              <button className="secondary-action" onClick={onGenerateScript} type="button">Generar</button>
-            </div>
-          </div>
-          <div className="assistant-editor">
-            <label>
-              Apertura
-              <textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((current) => ({ ...current, opening: event.target.value }))} />
-            </label>
-            <label>
-              Descubrimiento
-              <textarea value={scriptDraft.discovery} onChange={(event) => setScriptDraft((current) => ({ ...current, discovery: event.target.value }))} />
-            </label>
-            <label>
-              Objeciones
-              <textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((current) => ({ ...current, objectionHandling: event.target.value }))} />
-            </label>
-            <label>
-              Cierre y siguientes pasos
-              <textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((current) => ({ ...current, closing: event.target.value }))} />
-            </label>
-          </div>
-        </section>
-
-        {settings.activeAvatarProvider === "did" && (
-          <div className="did-debug-panel">
-            <strong>Diagnostico D-ID</strong>
-            <span>Estado: {didStatus}</span>
-            <span>Paso: {didDebug.lastStep}</span>
-            <span>WebRTC: {didDebug.connection} / ICE: {didDebug.ice}</span>
-            <span>Video: {didDebug.video}</span>
-            <span>Habla: {didDebug.lastSpeech}</span>
-            <span>Stream: {didDebug.streamId || "sin id"} / Session: {didDebug.sessionId || "sin id"}</span>
-            {didDebug.error && <em>Error: {didDebug.error}</em>}
-          </div>
-        )}
-
-        {/* ── Instructor Gallery (compact) ── */}
-        <div className="gallery-section-title">
-          <Bot size={14} />
-          Elige tu agente visual
-          <span className="gallery-divider" />
-        </div>
-        <div className="builtin-avatar-gallery">
-          {builtInAvatars.map((avatar) => (
-            <button
-              className={`builtin-avatar-card${selectedBuiltInAvatar === avatar.id ? " selected" : ""}`}
-              key={avatar.id}
-              onClick={() => onSelectBuiltInAvatar(avatar.id)}
-              type="button"
-            >
-              <div className="builtin-avatar-portrait">
-                <img src={avatar.image} alt={avatar.name} />
-              </div>
-              <strong>{avatar.name}</strong>
-              <small>{avatar.role}</small>
-              <span className="builtin-avatar-badge">✦ Gratuito</span>
-            </button>
-          ))}
-        </div>
-
-        {/* ── Advanced: 3D / Premium Avatars ── */}
-        <div className="gallery-section-title">
-          <Video size={14} />
-          Avanzado: 3D y premium
-          <span className="gallery-divider" />
-        </div>
-        <div className="avatar-picker">
-          {avatarChoices.map((choice) => {
-            const selected =
-              settings.activeAvatarProvider === choice.provider &&
-              (choice.value ? getActiveAvatarValue(settings) === choice.value : false);
-            return (
-              <button className={selected ? "avatar-choice selected" : "avatar-choice"} key={choice.id} onClick={() => onSelectAvatar(choice)} type="button">
-                <AvatarPreview id={choice.provider} />
-                <span>{choice.name}</span>
-                <small>{choice.label}</small>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function KnowledgeView({
-  items,
-  onDelete,
-  onSave,
-  onUpload,
-  settings,
-  setSettings,
-  strict,
-}: {
-  items: KnowledgeItem[];
-  onDelete: (id: number) => void;
-  onSave: () => void;
-  onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
-  settings: AppSettings;
-  setSettings: (settings: AppSettings | ((current: AppSettings) => AppSettings)) => void;
-  strict: boolean;
-}) {
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel wide">
-        <div className="panel-title">
-          <div>
-            <p>Assistant</p>
-            <h2>Prompt, instrucciones y comportamiento</h2>
-          </div>
-          <button className="primary-action" onClick={onSave} type="button">
-            <Save size={18} />
-            Guardar prompt
-          </button>
-        </div>
-        <div className="assistant-editor">
-          <label>
-            Nombre del asistente
-            <input value={settings.assistantName} onChange={(event) => setSettings((current) => ({ ...current, assistantName: event.target.value }))} />
-          </label>
-          <label>
-            System instructions
-            <textarea
-              value={settings.systemInstructions}
-              onChange={(event) => setSettings((current) => ({ ...current, systemInstructions: event.target.value }))}
-            />
-          </label>
-        </div>
-
-        <div className="panel-title">
-          <div>
-            <p>Centro de conocimiento</p>
-            <h2>RAG local: documentos, fragmentos y fuentes</h2>
-          </div>
-          <label className="upload-action">
-            <Upload size={18} />
-            Subir
-            <input multiple type="file" onChange={onUpload} />
-          </label>
-        </div>
-        <div className="data-table">
-          {items.map((item) => (
-            <article key={item.id}>
-              <FileText size={18} />
-              <div>
-                <strong>{item.title}</strong>
-                <span>{item.type} · {item.owner}</span>
-              </div>
-              <span className="pill">{item.status}</span>
-              <span>{item.updated}</span>
-              <button className="icon-danger" onClick={() => onDelete(item.id)} type="button" title="Borrar documento">
-                <Trash2 size={16} />
-              </button>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className="ops-panel">
-        <ShieldCheck size={28} />
-        <h2>{strict ? "RAG estricto activo" : "RAG abierto"}</h2>
-        <p className="muted">Los documentos se guardan en backend local, se fragmentan y se recuperan por búsqueda para alimentar OpenAI.</p>
-        <div className="rag-stats">
-          <strong>{items.length}</strong>
-          <span>documentos indexados</span>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ConversationsView({
-  items,
-  selectedConversationId,
-  setSelectedConversationId,
-  reply,
-  setReply,
-  wrapOutcome,
-  wrapReason,
-  wrapNotes,
-  wrapFollowUpAt,
-  setWrapOutcome,
-  setWrapReason,
-  setWrapNotes,
-  setWrapFollowUpAt,
-  onAssign,
-  onReply,
-  onWrapUp,
-  onRefresh,
-}: {
-  items: InboxConversation[];
-  selectedConversationId: string;
-  setSelectedConversationId: (value: string) => void;
-  reply: string;
-  setReply: (value: string) => void;
-  wrapOutcome: string;
-  wrapReason: string;
-  wrapNotes: string;
-  wrapFollowUpAt: string;
-  setWrapOutcome: (value: string) => void;
-  setWrapReason: (value: string) => void;
-  setWrapNotes: (value: string) => void;
-  setWrapFollowUpAt: (value: string) => void;
-  onAssign: (conversationId: string, assignedTo: string) => Promise<void>;
-  onReply: (conversationId: string) => Promise<void>;
-  onWrapUp: (conversationId: string) => Promise<void>;
-  onRefresh: () => Promise<void>;
-}) {
-  const selected = items.find((item) => item.id === selectedConversationId) || null;
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div><p>Bandeja</p><h2>Conversaciones</h2></div>
-          <button className="secondary-action" onClick={() => void onRefresh()} type="button">Actualizar</button>
-        </div>
-        <div className="data-table">
-          {items.map((item) => (
-            <article key={item.id} onClick={() => setSelectedConversationId(item.id)} style={{ cursor: "pointer", border: selectedConversationId === item.id ? "1px solid var(--brand)" : undefined }}>
-              <MessageSquare size={16} />
-              <div>
-                <strong>{item.customerKey}</strong>
-                <span>{item.lastChannel} · {item.status}</span>
-              </div>
-              <span className="pill">{item.assignedTo || "unassigned"}</span>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div><p>Detalle</p><h2>{selected ? selected.customerKey : "Selecciona conversación"}</h2></div>
-          {selected && <button className="secondary-action" onClick={() => void onAssign(selected.id, "agente-activo")} type="button">Asignarme</button>}
-        </div>
-        <div className="message-list" style={{ minHeight: 260 }}>
-          {(selected?.events || []).map((event) => (
-            <article className={`msg ${event.direction === "outbound" ? "user" : "assistant"}`} key={event.id}>
-              <strong>{event.channel} · {event.direction}</strong>
-              <p>{event.text || event.status}</p>
-            </article>
-          ))}
-        </div>
-        {selected && (
-          <form className="composer" onSubmit={(event) => { event.preventDefault(); void onReply(selected.id); }}>
-            <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Responder..." />
-            <button className="primary-action" type="submit"><ChevronRight size={16} /></button>
-          </form>
-        )}
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title"><div><p>Wrap-up</p><h2>Cierre obligatorio</h2></div></div>
-        <div className="assistant-editor">
-          <label>Outcome<input value={wrapOutcome} onChange={(event) => setWrapOutcome(event.target.value)} /></label>
-          <label>Reason<input value={wrapReason} onChange={(event) => setWrapReason(event.target.value)} /></label>
-          <label>Notas<textarea value={wrapNotes} onChange={(event) => setWrapNotes(event.target.value)} /></label>
-          <label>Follow-up<input type="datetime-local" value={wrapFollowUpAt} onChange={(event) => setWrapFollowUpAt(event.target.value)} /></label>
-        </div>
-        <button disabled={!selected} className="primary-action" onClick={() => selected && void onWrapUp(selected.id)} type="button">Cerrar interacción</button>
-      </section>
-    </div>
-  );
-}
-
-function CallsDeskView({
-  callStatus,
-  dialNumber,
-  selectedCustomer,
-  setDialNumber,
-  onConnectTwilio,
-  onDial,
-  onPersonalDial,
-  onHangup,
-  onSearchCustomer,
-  onGenerateScript,
-  scriptDraft,
-  setScriptDraft,
-}: {
-  callStatus: CallStatus;
-  dialNumber: string;
-  selectedCustomer: Record<string, unknown> | null;
-  setDialNumber: (value: string) => void;
-  onConnectTwilio: () => Promise<void>;
-  onDial: () => Promise<void>;
-  onPersonalDial: () => Promise<void>;
-  onHangup: () => Promise<void>;
-  onSearchCustomer: () => Promise<void>;
-  onGenerateScript: () => Promise<void>;
-  scriptDraft: ScriptDraft;
-  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
-}) {
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel">
-        <div className="panel-title"><div><p>Telefonía</p><h2>Llamadas</h2></div></div>
-        <div className="form-grid compact">
-          <label>Número<input value={dialNumber} placeholder="+52..." onChange={(event) => setDialNumber(event.target.value)} /></label>
-        </div>
-        <div className="header-actions">
-          <button className="secondary-action" onClick={() => void onConnectTwilio()} type="button">Conectar</button>
-          <button className="secondary-action" onClick={() => void onSearchCustomer()} type="button">Buscar cliente</button>
-          <button className="primary-action" onClick={() => void onDial()} type="button">Llamar</button>
-          <button className="secondary-action" onClick={() => void onPersonalDial()} type="button">Llamar con mi numero</button>
-          <button className="danger-action" onClick={() => void onHangup()} type="button">Colgar</button>
-        </div>
-        <div className="runtime-strip"><span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado: {callStatus}</span></div>
-        <p className="muted">Para usar "Llamar con mi numero": activa Phone Link en Windows 11 y Link to Windows en tu Samsung S22.</p>
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title"><div><p>Cliente</p><h2>Contexto CRM</h2></div></div>
-        <p className="muted">{selectedCustomer ? JSON.stringify(selectedCustomer) : "Selecciona o busca un cliente."}</p>
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div><p>Guion IA</p><h2>Asistencia de llamada</h2></div>
-          <button className="secondary-action" onClick={() => void onGenerateScript()} type="button">Generar</button>
-        </div>
-        <div className="assistant-editor">
-          <label>Apertura<textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((c) => ({ ...c, opening: event.target.value }))} /></label>
-          <label>Objeciones<textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((c) => ({ ...c, objectionHandling: event.target.value }))} /></label>
-          <label>Cierre<textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((c) => ({ ...c, closing: event.target.value }))} /></label>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ContactsView({
-  contacts,
-  leads,
-  onRefresh,
-  onSelect,
-}: {
-  contacts: CrmContact[];
-  leads: CrmContact[];
-  onRefresh: () => Promise<void>;
-  onSelect: (row: CrmContact) => void;
-}) {
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel wide">
-        <div className="panel-title">
-          <div><p>CRM</p><h2>Contactos</h2></div>
-          <button className="secondary-action" onClick={() => void onRefresh()} type="button">Sincronizar</button>
-        </div>
-        <div className="data-table">
-          {contacts.map((item) => (
-            <article key={item.id} onClick={() => onSelect(item)} style={{ cursor: "pointer" }}>
-              <Building2 size={16} />
-              <div>
-                <strong>{item.name || "Sin nombre"}</strong>
-                <span>{item.email || item.phone || "Sin datos de contacto"}</span>
-              </div>
-              <span>{item.account || "-"}</span>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title"><div><p>CRM</p><h2>Leads</h2></div></div>
-        <div className="data-table">
-          {leads.map((item) => (
-            <article key={item.id} onClick={() => onSelect(item)} style={{ cursor: "pointer" }}>
-              <FileText size={16} />
-              <div>
-                <strong>{item.name || "Lead sin nombre"}</strong>
-                <span>{item.email || item.phone || "Sin datos"}</span>
-              </div>
-              <span>{item.updated_at ? "Actualizado" : "-"}</span>
-            </article>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function PowerDialerView({
-  dialNumber,
-  setDialNumber,
-  onSearchCustomer,
-  onDial,
-  onHangup,
-  callStatus,
-}: {
-  dialNumber: string;
-  setDialNumber: (value: string) => void;
-  onSearchCustomer: () => Promise<void>;
-  onDial: () => Promise<void>;
-  onHangup: () => Promise<void>;
-  callStatus: CallStatus;
-}) {
-  return (
-    <section className="ops-panel">
-      <div className="panel-title"><div><p>Marcación</p><h2>Power Dialer</h2></div></div>
-      <div className="form-grid compact">
-        <label>Número<input value={dialNumber} onChange={(event) => setDialNumber(event.target.value)} /></label>
-      </div>
-      <div className="header-actions">
-        <button className="secondary-action" onClick={() => void onSearchCustomer()} type="button">Buscar</button>
-        <button className="primary-action" onClick={() => void onDial()} type="button">Llamar</button>
-        <button className="danger-action" onClick={() => void onHangup()} type="button">Colgar</button>
-      </div>
-      <div className="runtime-strip"><span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado: {callStatus}</span></div>
-    </section>
-  );
-}
-
-function EvaluationsView({ items }: { items: InboxConversation[] }) {
-  const total = items.length;
-  const closed = items.filter((item) => item.status === "closed").length;
-  const pendingWrap = items.filter((item) => item.status === "wrap_up_required").length;
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel"><h2>Total interacciones</h2><div className="rag-stats"><strong>{total}</strong><span>omnicanal</span></div></section>
-      <section className="ops-panel"><h2>Cerradas</h2><div className="rag-stats"><strong>{closed}</strong><span>con wrap-up</span></div></section>
-      <section className="ops-panel"><h2>Pendientes wrap-up</h2><div className="rag-stats"><strong>{pendingWrap}</strong><span>requieren cierre</span></div></section>
-    </div>
-  );
-}
-
-function MessagingView({
-  waTo,
-  waText,
-  tgChatId,
-  tgText,
-  setWaTo,
-  setWaText,
-  setTgChatId,
-  setTgText,
-  onSendWhatsApp,
-  onSendTelegram,
-}: {
-  waTo: string;
-  waText: string;
-  tgChatId: string;
-  tgText: string;
-  setWaTo: (value: string) => void;
-  setWaText: (value: string) => void;
-  setTgChatId: (value: string) => void;
-  setTgText: (value: string) => void;
-  onSendWhatsApp: () => void;
-  onSendTelegram: () => void;
-}) {
-  return (
-    <div className="ops-grid">
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div>
-            <p>Canal</p>
-            <h2>WhatsApp</h2>
-          </div>
-          <button className="primary-action" onClick={onSendWhatsApp} type="button">Enviar</button>
-        </div>
-        <div className="assistant-editor">
-          <label>
-            Numero destino
-            <input value={waTo} placeholder="+52..." onChange={(event) => setWaTo(event.target.value)} />
-          </label>
-          <label>
-            Mensaje
-            <textarea value={waText} onChange={(event) => setWaText(event.target.value)} />
-          </label>
-        </div>
-      </section>
-      <section className="ops-panel">
-        <div className="panel-title">
-          <div>
-            <p>Canal</p>
-            <h2>Telegram</h2>
-          </div>
-          <button className="primary-action" onClick={onSendTelegram} type="button">Enviar</button>
-        </div>
-        <div className="assistant-editor">
-          <label>
-            Chat ID
-            <input value={tgChatId} onChange={(event) => setTgChatId(event.target.value)} />
-          </label>
-          <label>
-            Mensaje
-            <textarea value={tgText} onChange={(event) => setTgText(event.target.value)} />
-          </label>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ScriptsView({
-  scriptDraft,
-  setScriptDraft,
-  onGenerate,
-}: {
-  scriptDraft: ScriptDraft;
-  setScriptDraft: (value: ScriptDraft | ((current: ScriptDraft) => ScriptDraft)) => void;
-  onGenerate: () => void;
-}) {
-  return (
-    <section className="ops-panel">
-      <div className="panel-title">
-        <div>
-          <p>IA comercial</p>
-          <h2>Guiones dinamicos por cliente</h2>
-        </div>
-        <button className="primary-action" onClick={onGenerate} type="button">Generar guion</button>
-      </div>
-      <div className="assistant-editor">
-        <label>
-          Apertura
-          <textarea value={scriptDraft.opening} onChange={(event) => setScriptDraft((current) => ({ ...current, opening: event.target.value }))} />
-        </label>
-        <label>
-          Descubrimiento
-          <textarea value={scriptDraft.discovery} onChange={(event) => setScriptDraft((current) => ({ ...current, discovery: event.target.value }))} />
-        </label>
-        <label>
-          Objeciones
-          <textarea value={scriptDraft.objectionHandling} onChange={(event) => setScriptDraft((current) => ({ ...current, objectionHandling: event.target.value }))} />
-        </label>
-        <label>
-          Cierre
-          <textarea value={scriptDraft.closing} onChange={(event) => setScriptDraft((current) => ({ ...current, closing: event.target.value }))} />
-        </label>
-        <label>
-          Proximos pasos
-          <textarea value={scriptDraft.nextSteps} onChange={(event) => setScriptDraft((current) => ({ ...current, nextSteps: event.target.value }))} />
-        </label>
-      </div>
-    </section>
-  );
-}
-
-function ProviderView({
-  settings,
-  setSettings,
-  updateProvider,
-}: {
-  settings: AppSettings;
-  setSettings: (settings: AppSettings | ((current: AppSettings) => AppSettings)) => void;
-  updateProvider: (id: ProviderId, patch: Partial<ProviderConfig>) => void;
-}) {
-  const integrationProviders = providerCatalog.filter((provider) =>
-    ["twilio", "whatsapp", "telegram", "openai", "gemini", "elevenlabs", "livekit", "pipecat"].includes(provider.id),
-  );
-  return (
-    <div className="providers-layout">
-      <section className="provider-grid">
-      {integrationProviders.map((provider) => {
-        const config = settings.providers[provider.id];
-        const selected = settings.activeProvider === provider.id;
-        return (
-          <article className={selected ? "provider-card selected" : "provider-card"} key={provider.id}>
-            <div>
-              <p>{provider.kind}</p>
-              <h2>{provider.name}</h2>
-              <span>{provider.use}</span>
-            </div>
-            <div className="need-list">
-              {provider.needs.map((need) => <span key={need}>{need}</span>)}
-            </div>
-            <div className="provider-actions">
-              <button className="secondary-action" type="button" onClick={() => updateProvider(provider.id, { enabled: !config.enabled })}>
-                {config.enabled ? "Desactivar" : "Activar"}
-              </button>
-              {(provider.kind.includes("IA") || provider.id === "pipecat") && (
-                <button className="primary-action" type="button" onClick={() => setSettings((current) => ({ ...current, activeProvider: provider.id }))}>
-                  Usar IA
-                </button>
-              )}
-            </div>
-          </article>
-        );
-      })}
-      </section>
-    </div>
-  );
-}
-
-function AvatarCreatorModal({
-  draft,
-  onChangeDraft,
-  onClose,
-  onSave,
-  onUpload,
-}: {
-  draft: string;
-  onChangeDraft: (value: string) => void;
-  onClose: () => void;
-  onSave: () => void;
-  onUpload: (file: File) => void;
-}) {
-  return (
-    <div className="avatar-modal-backdrop" role="dialog" aria-modal="true" aria-label="Creador de avatar 3D">
-      <section className="avatar-modal">
-        <div className="avatar-modal-head">
-          <div>
-            <p>Avatar 3D</p>
-            <h2>Carga un avatar real</h2>
-          </div>
-          <div className="modal-actions">
-            <button className="secondary-action" onClick={() => window.open("https://readyplayer.me/avatar", "_blank", "noopener,noreferrer")} type="button">
-              Ready Player Me
-            </button>
-            <button className="secondary-action" onClick={() => window.open("https://app.heygen.com", "_blank", "noopener,noreferrer")} type="button">
-              HeyGen
-            </button>
-            <button className="icon-button" onClick={onClose} type="button" aria-label="Cerrar creador">
-              <X size={20} />
-            </button>
-          </div>
-        </div>
-        <div className="avatar-loader-panel">
-          <div className="loader-card">
-            <strong>Archivo GLB local</strong>
-            <span>Descarga un avatar en formato .glb y subelo aqui. Queda servido por el backend local.</span>
-            <label className="upload-action">
-              <Upload size={18} />
-              Subir .glb
-              <input
-                accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
-                type="file"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) onUpload(file);
-                }}
-              />
-            </label>
-          </div>
-          <div className="loader-card">
-            <strong>URL de avatar</strong>
-            <span>Pega una URL directa a un .glb. Sirve para Ready Player Me, tu CDN o un archivo publico.</span>
-            <label>
-              URL del avatar .glb
-              <input
-                value={draft}
-                placeholder="https://.../avatar.glb"
-                onChange={(event) => onChangeDraft(event.target.value)}
-              />
-            </label>
-            <button className="primary-action" onClick={onSave} type="button">
-              Usar URL
-            </button>
-          </div>
-          <div className="loader-card premium">
-            <strong>Avatar realista con voz</strong>
-            <span>Para video-avatar humano real, usa HeyGen o D-ID con API key y avatar_id. Eso no es gratis de forma seria.</span>
-            <a href="https://developers.heygen.com/docs/quick-start" target="_blank" rel="noreferrer">Ver API de HeyGen</a>
-          </div>
-        </div>
-        <div className="avatar-url-capture">
-          <label>
-            Avatar seleccionado
-            <input
-              value={draft}
-              placeholder="Sin avatar cargado"
-              onChange={(event) => onChangeDraft(event.target.value)}
-            />
-          </label>
-          <button className="primary-action" onClick={onSave} type="button">
-            Usar este avatar
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function isAvatarProvider(provider: (typeof providerCatalog)[number]) {
-  return provider.kind.includes("Avatar");
-}
-
-function voiceSourceLabel(source: "none" | "browser" | "openai" | "livekit-agent") {
-  if (source === "openai") return "OpenAI Realtime";
-  if (source === "browser") return "Navegador";
-  if (source === "livekit-agent") return "Agente LiveKit";
-  return "Ninguna";
-}
-
-function ModelViewer({ alt, className, src }: { alt: string; className: string; src?: string }) {
-  const viewerRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    const viewer = viewerRef.current;
-    if (!viewer || !src) return;
-    viewer.setAttribute("src", avatarAssetUrl(src));
-    viewer.setAttribute("alt", alt);
-    viewer.setAttribute("camera-controls", "");
-    // Centrar la cámara exactamente en el rostro (1.55m de altura) con zoom cercano (1.2m)
-    viewer.setAttribute("camera-target", "0m 1.55m 0m");
-    viewer.setAttribute("camera-orbit", "0deg 85deg 1.2m");
-    viewer.setAttribute("field-of-view", "30deg");
-    viewer.setAttribute("shadow-intensity", "1");
-    viewer.setAttribute("exposure", "1.2");
-    // Añadimos interpolación suave
-    viewer.setAttribute("interpolation-decay", "200");
-    viewer.setAttribute("min-camera-orbit", "auto auto 0.8m");
-    viewer.setAttribute("max-camera-orbit", "auto auto 2.5m");
-  }, [alt, src]);
-
-  return <model-viewer ref={viewerRef} class={className} />;
-}
-
-function AvatarPreview({ id }: { id: ProviderId }) {
-  const avatar = avatarChoices.find((choice) => choice.provider === id);
-  if (!avatar) return <span className="provider-mark">AI</span>;
-  const code = id === "readyplayerme" ? "3D" : id === "talkinghead" ? "TH" : id === "heygen" ? "HG" : id === "did" ? "D-ID" : "AI";
-  return (
-    <span className={`provider-mark ${avatar.style}`}>
-      {code}
-    </span>
-  );
-}
-
-function Status({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
-  return (
-    <div className="status-row">
-      {ok ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}
-      <div>
-        <strong>{label}</strong>
-        <span>{detail || (ok ? "Listo" : "Pendiente")}</span>
-      </div>
-    </div>
   );
 }
