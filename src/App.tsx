@@ -875,6 +875,27 @@ export function App() {
     }
   };
 
+  const startPersonalPhoneLinkCall = async () => {
+    const to = dialNumber.trim();
+    if (!to) return;
+    try {
+      window.open(`tel:${encodeURIComponent(to)}`, "_self");
+      await fetch("/api/telephony/personal-line/attempt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to,
+          crmEntityType: "contact",
+          crmEntityId: selectedCustomer && typeof selectedCustomer.id === "string" ? selectedCustomer.id : "",
+        }),
+      });
+      setNotice("Llamada iniciada por linea personal (Phone Link) y registrada en CRM.");
+      await loadInbox();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo iniciar la llamada personal.");
+    }
+  };
+
   const loadInbox = async () => {
     try {
       const res = await fetch("/api/inbox/list", {
@@ -1501,6 +1522,7 @@ export function App() {
             setDialNumber={setDialNumber}
             onConnectTwilio={connectTwilioDevice}
             onDial={startOutboundCall}
+            onPersonalDial={startPersonalPhoneLinkCall}
             onHangup={hangupCall}
             onSearchCustomer={searchCustomerByPhone}
             onGenerateScript={generateScript}
@@ -2302,6 +2324,7 @@ function CallsDeskView({
   setDialNumber,
   onConnectTwilio,
   onDial,
+  onPersonalDial,
   onHangup,
   onSearchCustomer,
   onGenerateScript,
@@ -2314,6 +2337,7 @@ function CallsDeskView({
   setDialNumber: (value: string) => void;
   onConnectTwilio: () => Promise<void>;
   onDial: () => Promise<void>;
+  onPersonalDial: () => Promise<void>;
   onHangup: () => Promise<void>;
   onSearchCustomer: () => Promise<void>;
   onGenerateScript: () => Promise<void>;
@@ -2331,9 +2355,11 @@ function CallsDeskView({
           <button className="secondary-action" onClick={() => void onConnectTwilio()} type="button">Conectar</button>
           <button className="secondary-action" onClick={() => void onSearchCustomer()} type="button">Buscar cliente</button>
           <button className="primary-action" onClick={() => void onDial()} type="button">Llamar</button>
+          <button className="secondary-action" onClick={() => void onPersonalDial()} type="button">Llamar con mi numero</button>
           <button className="danger-action" onClick={() => void onHangup()} type="button">Colgar</button>
         </div>
         <div className="runtime-strip"><span className={callStatus === "in-call" ? "runtime-pill ok" : "runtime-pill"}>Estado: {callStatus}</span></div>
+        <p className="muted">Para usar "Llamar con mi numero": activa Phone Link en Windows 11 y Link to Windows en tu Samsung S22.</p>
       </section>
       <section className="ops-panel">
         <div className="panel-title"><div><p>Cliente</p><h2>Contexto CRM</h2></div></div>

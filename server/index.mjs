@@ -971,6 +971,53 @@ app.post("/api/telephony/call/hangup", async (req, res) => {
   }
 });
 
+app.post("/api/telephony/personal-line/attempt", async (req, res) => {
+  try {
+    const to = normalizePhone(req.body?.to);
+    if (!to) {
+      res.status(400).json({ error: "Numero destino invalido." });
+      return;
+    }
+    const customerRef = {
+      phone: to,
+      crmEntityType: asString(req.body?.crmEntityType || "contact", 40),
+      crmEntityId: asString(req.body?.crmEntityId || "", 140) || undefined,
+    };
+    const conversation = appendConversationEvent({
+      channel: "voice",
+      direction: "outbound",
+      status: "wrap_up_required",
+      text: `Intento de llamada por linea personal a ${to}`,
+      customerRef,
+      metadata: {
+        lineType: "personal_phone_link",
+        initiatedAt: nowIso(),
+      },
+    });
+
+    const config = await getEffectiveConfig();
+    await fetchCrmBridge(config, {
+      action: "logActivity",
+      activity: {
+        entityType: customerRef.crmEntityType,
+        entityId: customerRef.crmEntityId || to,
+        activityType: "call",
+        title: "Intento de llamada (linea personal)",
+        description: `Se inicio llamada personal (Phone Link) hacia ${to}.`,
+        metadata: {
+          channel: "voice",
+          lineType: "personal_phone_link",
+          conversationId: conversation.id,
+        },
+      },
+    });
+
+    res.json({ ok: true, conversationId: conversation.id });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo registrar intento de linea personal.", detail: error instanceof Error ? error.message : "Error desconocido" });
+  }
+});
+
 app.post("/api/telephony/webhooks/voice", async (req, res) => {
   const config = await getEffectiveConfig();
   const twilioConfig = getTwilioConfig(config);
