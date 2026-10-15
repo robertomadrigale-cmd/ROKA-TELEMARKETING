@@ -5,5 +5,8 @@ _reference/
 .env.local
 npm-debug.log*
 *.tsbuildinfo
+.firebase/
+coverage/
+.claude/
 vite.config.js
 vite.config.d.ts

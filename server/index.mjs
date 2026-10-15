@@ -314,6 +314,7 @@ function parseAllowedOrigins(csvValue) {
 
 function originAllowed(twilioConfig, origin) {
   const list = parseAllowedOrigins(twilioConfig.allowedOrigins);
+  if (!origin) return true;
   if (list.length === 0) return true;
   return list.includes(origin);
 }
@@ -897,18 +898,26 @@ app.post("/api/telephony/token", async (req, res) => {
       return;
     }
     const identity = asString(req.body?.identity || `agente-${Date.now()}`, 80);
-    const voiceGrant = new twilio.jwt.AccessToken.VoiceGrant({
+    const AccessToken = twilio.jwt.AccessToken;
+    const VoiceGrant = AccessToken.VoiceGrant;
+    const voiceGrant = new VoiceGrant({
       outgoingApplicationSid: twilioConfig.twimlAppSid,
       incomingAllow: true,
     });
-    const token = new twilio.jwt.AccessToken(
+    const token = new AccessToken(
       twilioConfig.accountSid,
       twilioConfig.apiKeySid,
       twilioConfig.apiKeySecret,
       { identity, ttl: 3600 },
     );
     token.addGrant(voiceGrant);
-    res.json({ token: token.toJwt(), identity });
+    const jwt = token.toJwt();
+    const looksLikeJwt = typeof jwt === "string" && jwt.split(".").length === 3;
+    if (!looksLikeJwt) {
+      res.status(500).json({ error: "Token Twilio invalido generado por backend." });
+      return;
+    }
+    res.json({ token: jwt, identity, expiresIn: 3600 });
   } catch (error) {
     res.status(500).json({ error: "No se pudo crear token Twilio.", detail: error instanceof Error ? error.message : "Error desconocido" });
   }
